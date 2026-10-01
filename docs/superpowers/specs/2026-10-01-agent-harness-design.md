@@ -27,37 +27,42 @@
 
 ## 用例图
 
-以下用 Mermaid 绘制用例关系；椭圆代表用例，外框代表本项目的 Agent 系统。
+以下使用 Mermaid `graph LR` 表示参与者、系统边界和主要用例。虚线表示包含或按需扩展关系。
 
 ```mermaid
-flowchart LR
+graph LR
     user["用户"]
-    model["模型提供方"]
     operator["平台运维"]
+    model["模型服务"]
+    sandbox["用户插件沙箱"]
 
     subgraph system["Agent 系统"]
-        upload(["上传插件修订版"])
+        configure(["配置模型路由与沙箱策略"])
+        upload(["上传个人插件修订版"])
         enable(["启用或停用个人插件"])
+        mount(["装载或卸载该用户插件"])
         chat(["创建或恢复会话并发送消息"])
-        stream(["查看回复与工具执行记录"])
+        invoke(["请求模型生成回复"])
+        execute(["调用个人工具并继续生成"])
+        history(["查看回复与工具执行记录"])
         cancel(["取消正在运行的回合"])
-        invoke(["请求模型生成下一步"])
-        execute(["在个人沙箱中执行工具"])
-        provision(["配置模型路由与沙箱策略"])
     end
 
     user --- upload
     user --- enable
     user --- chat
-    user --- stream
+    user --- history
     user --- cancel
-    operator --- provision
-    chat -.->|包含| invoke
-    invoke -.->|模型请求工具时包含| execute
+    operator --- configure
     model --- invoke
+    sandbox --- mount
+    sandbox --- execute
+    enable -.->|包含| mount
+    chat -.->|包含| invoke
+    execute -.->|按需扩展| invoke
 ```
 
-用户只能管理自己的插件安装。插件上传并不等于立即运行：系统先保存不可变修订版和摘要，启用时才在该用户的沙箱内装载。模型提供方只接收可信核心组装的请求。
+用户只能管理自己的插件安装。插件上传并不等于立即运行：系统先保存不可变修订版和摘要，启用时才通过沙箱编排器在该用户的沙箱内装载。API 校验身份、插件归属、会话归属和工作空间权限；模型服务只接收可信核心组装的请求。
 
 ## 运行流程时序图
 
