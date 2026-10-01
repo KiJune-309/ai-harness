@@ -59,28 +59,65 @@ flowchart LR
 
 用户只能管理自己的插件安装。插件上传并不等于立即运行：系统先保存不可变修订版和摘要，启用时才在该用户的沙箱内装载。模型提供方只接收可信核心组装的请求。
 
-## 运行流程图
+## 运行流程泳道图
+
+泳道按执行责任划分。此图使用 Mermaid 11.16 及以上版本的 `swimlane-beta` 语法。
 
 ```mermaid
-flowchart TD
-    A["API 验证用户与工作空间权限"] --> B["加载或创建 AgentSession"]
-    B --> C["记录 turn.started 与 user.message"]
-    C --> D["投影会话事件并组装提示词及工具清单"]
-    D --> E["调用模型并持久化流式输出后发送客户端"]
-    E --> F{"模型是否请求工具？"}
-    F -- 否 --> G["记录 assistant.completed 和 turn.finished"]
-    F -- 是 --> H["校验工具、参数、权限和执行预算"]
-    H --> I["记录 tool.requested 与 tool.started"]
-    I --> J["通过 SandboxBridge 派发到该用户沙箱"]
-    J --> K{"调用结果"}
-    K -- 成功 --> L["记录 tool.succeeded"]
-    K -- 明确失败 --> M["记录 tool.failed"]
-    K -- 结果未知 --> N["记录 tool.unknown 并结束本轮"]
-    L --> O["将工具结果加入下一步模型输入"]
-    M --> O
-    O --> P{"步骤或时间预算是否耗尽？"}
-    P -- 否 --> D
-    P -- 是 --> Q["记录 turn.failed 与原因"]
+swimlane-beta LR
+    subgraph client [用户与 Web]
+        send(["发送消息"])
+        receive["接收已持久化的回复片段"]
+        cancel(["请求取消"])
+        viewEnd(["查看本轮最终状态"])
+    end
+
+    subgraph api [API]
+        authorize["验证身份和工作空间权限"]
+        forward["转发流式片段"]
+        authorizeCancel["鉴权并转发取消请求"]
+        reportEnd["返回最终状态"]
+    end
+
+    subgraph core [Agent 核心]
+        openSession["加载或创建会话"]
+        startTurn["记录回合开始和用户消息"]
+        assemble["投影事件并组装提示词与工具清单"]
+        persistOutput["保存模型输出；有可见片段才推送"]
+        decide{"模型输出类型？"}
+        complete["记录最终回复和回合完成"]
+        validate["校验工具、参数、权限与预算"]
+        recordRequest["记录工具请求"]
+        recordStarted["收到开始确认后记录执行开始"]
+        outcome{"工具结果状态？"}
+        succeeded["记录工具成功"]
+        failed["记录工具明确失败"]
+        unknown["记录结果未知并结束本轮"]
+        budget{"步骤或时间预算耗尽？"}
+        limit["记录本轮失败及原因"]
+        stop["停止派发并结算在途调用，记录取消"]
+    end
+
+    subgraph model [模型服务]
+        generate["流式生成回复或工具请求"]
+    end
+
+    subgraph sandbox [该用户的插件沙箱]
+        accept["确认接收工具调用"]
+        execute["执行工具并返回结果"]
+    end
+
+    send --> authorize --> openSession --> startTurn --> assemble --> generate
+    generate --> persistOutput --> decide
+    persistOutput -.->|有可见片段| forward --> receive
+    decide -->|最终回复| complete --> reportEnd --> viewEnd
+    decide -->|工具请求| validate --> recordRequest --> accept --> recordStarted --> execute --> outcome
+    outcome -->|成功| succeeded --> budget
+    outcome -->|明确失败| failed --> budget
+    outcome -->|结果未知| unknown --> reportEnd
+    budget -->|否| assemble
+    budget -->|是| limit --> reportEnd
+    cancel --> authorizeCancel --> stop --> reportEnd
 ```
 
 取消可在模型流或工具执行期间到达：核心停止后续派发，保留已持久化并已展示的内容，并记录 `turn.cancelled`。工具调用结果若已确定，仍需写入对应结果；已派发但无法确认结果的调用写入 `tool.unknown`。流式内容按有序片段落库后再发送，客户端可用事件序号去重并在重连后补齐。
@@ -218,6 +255,7 @@ flowchart LR
 
 - 沙箱启动后，通过桥接协议报告工具名、版本、输入 JSON Schema、执行模式（默认串行；明确声明安全的工具可并行）和所属插件修订版。可信核心校验名称冲突、协议版本、模式和 schema 后再加入该用户的工具视图。
 - `ToolInvocation` 由可信核心生成，包含调用 ID、会话 ID、回合 ID、工具版本、参数和截止时间。桥接层依据可信会话归属选定用户沙箱，不让插件选择目标用户。
+- 沙箱先确认接收调用，核心持久化 `tool.started` 后再允许执行；没有收到确认的调用不标记为已开始。执行断连时仍按实际可确认的结果决定 `failed` 或 `unknown`。
 - 返回值是可序列化的成功结果或结构化错误。模型仅看到经过大小限制和敏感内容过滤的结果；服务端事件与审计元数据同样不记录平台密钥或原始凭据。
 - 远程接口不传递 Cordis `Context`、数据库客户端、平台密钥或原始容器控制句柄。插件若需要平台能力，必须通过另行定义并授权的能力接口调用。
 - 每个用户的沙箱内可同时装载多个个人插件；它们可以按 Cordis 依赖关系使用该用户沙箱内的服务，但不能发现其他用户的服务。
