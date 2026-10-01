@@ -59,65 +59,90 @@ flowchart LR
 
 用户只能管理自己的插件安装。插件上传并不等于立即运行：系统先保存不可变修订版和摘要，启用时才在该用户的沙箱内装载。模型提供方只接收可信核心组装的请求。
 
-## 运行流程泳道图
+## 运行流程时序图
 
-泳道按执行责任划分。此图使用 Mermaid 11.16 及以上版本的 `swimlane-beta` 语法。
+参与者按调用顺序排列；模型步骤、流式片段及结果分支使用 Mermaid `sequenceDiagram` 表示。
 
 ```mermaid
-swimlane-beta LR
-    subgraph client [用户与 Web]
-        send(["发送消息"])
-        receive["接收已持久化的回复片段"]
-        cancel(["请求取消"])
-        viewEnd(["查看本轮最终状态"])
+sequenceDiagram
+    actor User as 用户
+    participant Web as Web
+    participant API as API
+    participant Core as Agent 核心
+    participant Store as 会话事件存储
+    participant Model as 模型服务
+    participant Sandbox as 该用户的插件沙箱
+
+    User->>Web: 提交消息
+    Web->>API: 发送消息与会话 ID
+    API->>API: 验证身份和工作空间权限
+    API->>Core: startTurn(可信上下文, 消息)
+    Core->>Store: 加载或创建会话，追加 turn.started 和 user.message
+    Store-->>Core: 会话及事件序号
+
+    loop 每个模型步骤，直到回合结束
+        Core->>Core: 检查步骤和时间预算
+        alt 预算耗尽
+            Core->>Store: 追加 turn.failed
+            Core-->>API: 返回预算耗尽状态
+            API-->>Web: 返回最终状态
+        else 允许继续
+            Core->>Store: 读取事件并追加 step.started
+            Store-->>Core: 当前会话事件
+            Core->>Core: 组装提示词和该用户的工具清单
+            Core->>Model: 发起流式模型请求
+            loop 每个可见回复片段
+                Model-->>Core: assistant.chunk
+                Core->>Store: 先追加 assistant.chunk
+                Store-->>Core: 事件序号
+                Core-->>API: 推送已持久化片段及序号
+                API-->>Web: 流式转发
+                Web-->>User: 展示片段
+            end
+            Model-->>Core: 最终回复或工具请求
+            alt 最终回复
+                Core->>Store: 追加 assistant.completed、step.finished、turn.finished
+                Core-->>API: 回合完成
+                API-->>Web: 返回最终状态
+            else 工具请求
+                Core->>Core: 校验工具、参数和权限
+                Core->>Store: 追加 tool.requested
+                alt 校验失败
+                    Core->>Store: 追加 tool.failed 和 step.finished
+                else 校验通过
+                    Core->>Sandbox: 准备调用并等待接收确认
+                    Sandbox-->>Core: 已接收调用
+                    Core->>Store: 追加 tool.started
+                    Core->>Sandbox: 允许执行工具
+                    alt 执行成功
+                        Sandbox-->>Core: 成功结果
+                        Core->>Store: 追加 tool.succeeded 和 step.finished
+                    else 明确失败
+                        Sandbox-->>Core: 结构化错误
+                        Core->>Store: 追加 tool.failed 和 step.finished
+                    else 结果未知
+                        Core->>Store: 追加 tool.unknown、step.finished、turn.failed
+                        Core-->>API: 返回需检查的状态
+                        API-->>Web: 返回最终状态
+                    end
+                end
+                Note over Core,Model: 成功或明确失败时，下一步骤使用工具结果
+            end
+        end
     end
 
-    subgraph api [API]
-        authorize["验证身份和工作空间权限"]
-        forward["转发流式片段"]
-        authorizeCancel["鉴权并转发取消请求"]
-        reportEnd["返回最终状态"]
+    Note over User,Sandbox: 以下取消分支可在模型调用或工具执行期间触发
+    opt 用户取消正在运行的回合
+        User->>Web: 请求取消
+        Web->>API: 取消回合
+        API->>API: 验证取消权限
+        API->>Core: 发送取消信号
+        Core->>Model: 中止在途模型请求
+        Core->>Sandbox: 中止在途工具调用（若存在）
+        Core->>Store: 结算在途调用，追加 turn.cancelled
+        Core-->>API: 返回取消状态
+        API-->>Web: 返回最终状态
     end
-
-    subgraph core [Agent 核心]
-        openSession["加载或创建会话"]
-        startTurn["记录回合开始和用户消息"]
-        assemble["投影事件并组装提示词与工具清单"]
-        persistOutput["保存模型输出；有可见片段才推送"]
-        decide{"模型输出类型？"}
-        complete["记录最终回复和回合完成"]
-        validate["校验工具、参数、权限与预算"]
-        recordRequest["记录工具请求"]
-        recordStarted["收到开始确认后记录执行开始"]
-        outcome{"工具结果状态？"}
-        succeeded["记录工具成功"]
-        failed["记录工具明确失败"]
-        unknown["记录结果未知并结束本轮"]
-        budget{"步骤或时间预算耗尽？"}
-        limit["记录本轮失败及原因"]
-        stop["停止派发并结算在途调用，记录取消"]
-    end
-
-    subgraph model [模型服务]
-        generate["流式生成回复或工具请求"]
-    end
-
-    subgraph sandbox [该用户的插件沙箱]
-        accept["确认接收工具调用"]
-        execute["执行工具并返回结果"]
-    end
-
-    send --> authorize --> openSession --> startTurn --> assemble --> generate
-    generate --> persistOutput --> decide
-    persistOutput -.->|有可见片段| forward --> receive
-    decide -->|最终回复| complete --> reportEnd --> viewEnd
-    decide -->|工具请求| validate --> recordRequest --> accept --> recordStarted --> execute --> outcome
-    outcome -->|成功| succeeded --> budget
-    outcome -->|明确失败| failed --> budget
-    outcome -->|结果未知| unknown --> reportEnd
-    budget -->|否| assemble
-    budget -->|是| limit --> reportEnd
-    cancel --> authorizeCancel --> stop --> reportEnd
 ```
 
 取消可在模型流或工具执行期间到达：核心停止后续派发，保留已持久化并已展示的内容，并记录 `turn.cancelled`。工具调用结果若已确定，仍需写入对应结果；已派发但无法确认结果的调用写入 `tool.unknown`。流式内容按有序片段落库后再发送，客户端可用事件序号去重并在重连后补齐。
