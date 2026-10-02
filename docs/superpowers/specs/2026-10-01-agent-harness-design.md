@@ -105,7 +105,7 @@ graph LR
 
 ## 运行流程时序图
 
-本图只描述 Agent 执行一个对话回合。插件列表、插件上传、注册、登录、获取个人信息和对话列表分别见[功能时序图](./2026-10-02-feature-sequence-diagrams.md)。参与者按调用顺序排列；模型步骤、流式片段及结果分支使用 Mermaid `sequenceDiagram` 表示。
+本图只描述 Agent 执行一个对话回合。插件列表、插件上传、注册、登录、获取个人信息和对话列表分别见[功能 PRD](./2026-10-02-feature-sequence-diagrams.md)。参与者按调用顺序排列；模型步骤、流式片段及结果分支使用 Mermaid `sequenceDiagram` 表示。
 
 ```mermaid
 sequenceDiagram
