@@ -27,23 +27,19 @@
 
 ## 用例图
 
-以下使用 Mermaid `graph LR` 表示参与者、系统边界和主要用例。虚线表示包含或按需扩展关系。
+以下按参与者分成四张独立的 Mermaid `graph LR` 图。每张图只展示该参与者涉及的用例，让标签和关系更易阅读。虚线表示包含或按需扩展关系。
+
+### 用户
 
 ```mermaid
 graph LR
+    classDef default font-size:20px;
     user["用户"]
-    operator["平台运维"]
-    model["模型服务"]
-    sandbox["用户插件沙箱"]
 
-    subgraph system["Agent 系统"]
-        configure(["配置模型路由与沙箱策略"])
+    subgraph system["Agent 系统：用户用例"]
         upload(["上传个人插件修订版"])
         enable(["启用或停用个人插件"])
-        mount(["装载或卸载该用户插件"])
         chat(["创建或恢复会话并发送消息"])
-        invoke(["请求模型生成回复"])
-        execute(["调用个人工具并继续生成"])
         history(["查看回复与工具执行记录"])
         cancel(["取消正在运行的回合"])
     end
@@ -53,13 +49,56 @@ graph LR
     user --- chat
     user --- history
     user --- cancel
+```
+
+### 平台运维
+
+```mermaid
+graph LR
+    classDef default font-size:20px;
+    operator["平台运维"]
+
+    subgraph system["Agent 系统：平台配置"]
+        configure(["配置模型路由与沙箱策略"])
+        modelRoute(["设置模型路由"])
+        sandboxPolicy(["设置沙箱策略"])
+    end
+
     operator --- configure
+    configure -.->|包含| modelRoute
+    configure -.->|包含| sandboxPolicy
+```
+
+### 模型服务
+
+```mermaid
+graph LR
+    classDef default font-size:20px;
+    model["模型服务"]
+
+    subgraph system["Agent 系统：模型交互"]
+        invoke(["请求模型生成回复"])
+        execute(["调用个人工具并继续生成"])
+    end
+
     model --- invoke
+    execute -.->|按需扩展| invoke
+```
+
+### 用户插件沙箱
+
+```mermaid
+graph LR
+    classDef default font-size:20px;
+    sandbox["用户插件沙箱"]
+
+    subgraph system["Agent 系统：沙箱交互"]
+        mount(["装载或卸载该用户插件"])
+        execute(["执行个人工具"])
+    end
+
     sandbox --- mount
     sandbox --- execute
-    enable -.->|包含| mount
-    chat -.->|包含| invoke
-    execute -.->|按需扩展| invoke
 ```
 
 用户只能管理自己的插件安装。插件上传并不等于立即运行：系统先保存不可变修订版和摘要，启用时才通过沙箱编排器在该用户的沙箱内装载。API 校验身份、插件归属、会话归属和工作空间权限；模型服务只接收可信核心组装的请求。
