@@ -1,87 +1,145 @@
 # 第一阶段技术方案
 
-状态：设计草案。更新日期：2026-10-02。对应[需求清单](./requirements-checklist.md)中的 P0 项，产品范围以 [L1 项目 PRD](./prd/project.md) 为准。本文说明实现路径，不代表仓库已有这些服务、接口或表结构；Agent 细节遵循[多用户 Agent Harness 设计](./superpowers/specs/2026-10-01-agent-harness-design.md)。
+状态：设计草案。更新日期：2026-10-02。范围对应[需求清单](./requirements-checklist.md)的 P0 项与[项目总体 PRD](./prd/project.md)。仓库目前只有 workspace 骨架和工程工具；下文业务接口、数据库表和沙箱尚未实现。“拟采用”版本须经集成测试后写入清单并精确锁定。
 
-## 目标与设计原则
+## 1. 整体架构图
 
-在现有 pnpm monorepo 中完成“注册/登录 → 上传并启用个人插件 → 发送消息 → Agent 调用个人工具 → 查看对话”的服务器端闭环。API 负责身份与授权，runtime 负责模型和工具执行，用户代码只在独立沙箱内运行。PostgreSQL 保存业务主记录与会话事实，Redis 保存短期 token 会话和运行协调信息，对象存储保存上传包。
+```mermaid
+flowchart LR
+    U["用户浏览器"]
+    subgraph App["应用层"]
+        W["apps/web<br/>Next.js 页面"]
+        A["apps/api<br/>NestJS HTTP / 身份与授权"]
+        O["apps/api 独立进程入口<br/>沙箱编排"]
+    end
+    subgraph Core["可信执行层"]
+        R["packages/ai-runtime<br/>Cordis + Agent 循环 + 工具桥接"]
+        D["packages/db<br/>迁移与数据库访问"]
+        C["packages/contracts<br/>公开类型与校验"]
+    end
+    subgraph UserCode["用户代码层"]
+        S["每用户独立沙箱<br/>Cordis 根上下文与插件服务"]
+    end
+    subgraph Infra["数据与外部依赖"]
+        P[("PostgreSQL<br/>用户、插件、会话事件")]
+        X[("Redis<br/>token 会话、短期协调")]
+        B[("对象存储<br/>插件代码包")]
+        M["模型服务"]
+    end
+    U -->|页面操作| W
+    W -->|HTTPS / Bearer token / 事件流| A
+    A -->|可信用户与工作空间上下文| R
+    A -->|启停插件| O
+    A -->|token 会话| X
+    O -->|短期租约| X
+    A -->|上传代码包| B
+    A -->|业务读写| D
+    R -->|事件读写| D
+    D --> P
+    R -->|模型请求与回复| M
+    R -->|受版本约束的工具协议| S
+    O -->|启动、装载、停止| S
+    O -->|读取已授权修订版| B
+    W -.->|共享契约| C
+    A -.->|共享契约| C
+    R -.->|共享契约| C
+```
 
-第一阶段不接入知识库检索、Neo4j、插件市场和团队共享插件。实现时先打通单用户闭环，再用两个用户验证隔离；不能把 Cordis 的服务作用域当作不可信代码的进程隔离。
+登录由 API 签发 access token，并在 Redis 保存短期会话。后续请求携带 token，API 验证身份与资源权限后将可信上下文交给 runtime。插件上传写入对象存储与 PostgreSQL；启用时由编排进程装载进该用户沙箱。runtime 请求模型，并通过桥接协议调用当前用户工具；可见回复先写入 PostgreSQL 事件日志，再发送给 Web。完整回合见[Agent 时序图](./superpowers/specs/2026-10-01-agent-harness-design.md#运行流程时序图)。
 
-## 系统边界
+## 2. 技术选型表
 
-| 位置                  | 第一阶段职责                                                        | 禁止跨越的边界                                                  |
-| --------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `apps/web`            | 注册登录、插件上传与列表、聊天和对话列表、消费流式事件。            | 只依赖 `contracts`，不持有服务端密钥或导入服务端包。            |
-| `apps/api`            | HTTP 入口、token 验证、工作空间授权、上传与插件管理、调用 runtime。 | 不执行用户插件代码；不能信任客户端提供的 `userId`。             |
-| `packages/ai-runtime` | Cordis 可信核心、模型循环、事件存储、工具视图与沙箱桥接。           | 不依赖 NestJS；不把数据库客户端或可信 Cordis Context 传进沙箱。 |
-| `packages/db`         | PostgreSQL schema、迁移与共享访问基础。                             | 不依赖应用包。                                                  |
-| `packages/contracts`  | 公开请求、响应、流式事件和校验规则。                                | 不包含服务端数据库客户端、密钥或容器控制接口。                  |
-| `infra`               | PostgreSQL、Redis、对象存储及沙箱运行环境配置。                     | 不放业务逻辑。                                                  |
+| 类别         | 选型与阶段                                                   | 理由                                                                 |
+| ------------ | ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| 语言与运行时 | TypeScript；Node.js 24 LTS（拟采用）                         | 与现有 workspace 一致，Web、API 和 runtime 可共用类型契约。          |
+| 包管理       | pnpm 11.5.2（仓库已有）                                      | 已写入根目录配置，用单个锁文件管理 workspace。                       |
+| Web          | React 19 + Next.js 16（拟采用）                              | 符合既定 React/Next.js 目录职责，支持服务器部署与交互式聊天。        |
+| HTTP API     | NestJS 12（拟采用）                                          | 符合既定 API 边界，模块与守卫便于组织身份、上传和管理接口。          |
+| Agent 框架   | 上游开源 Cordis 4.0.0-rc.10 候选（拟采用）                   | 负责服务注入与插件生命周期；Agent loop、事件和工具协议由本项目实现。 |
+| 主记录       | PostgreSQL 17（拟采用）                                      | 归属关系、不可变修订版和会话事件需要事务、约束与稳定排序。           |
+| 短期状态     | Redis 7.4（拟采用）                                          | 保存可撤销的 token 会话及运行协调状态。                              |
+| 代码包       | S3 兼容对象存储（拟采用）                                    | 上传包独立保存，数据库仅保留对象引用与摘要。                         |
+| 用户沙箱     | Linux 每用户独立容器；Docker Engine 29 候选（拟采用）        | 为用户代码提供独立进程、文件系统、网络与资源限制。                   |
+| 关键库       | `pg` 8、`redis` 6、`@aws-sdk/client-s3` 3、`zod` 4（拟采用） | 分别负责数据库、短期会话、对象存储和边界数据校验。                   |
 
-如需独立的沙箱编排进程，先在 `apps/api` 增加单独进程入口，不提前拆新服务。可信核心和每个用户沙箱分别建立 Cordis 根上下文；双方通过有版本号的进程间协议交换工具定义、调用和结果。
+### 重大选型对比
 
-## 请求与执行路径
+| 选择                          | 为什么采用                                               | 为什么不用备选方案                                                                                                    |
+| ----------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 上游 Cordis + 自研 Agent loop | 保留已确认的插件生命周期，同时由项目控制事件和执行语义。 | 整套 DeepSeek Harness 会引入额外产品结构；完全自写插件容器需要重做服务注入和卸载。Cordis 4 仍是候选，先做兼容性验证。 |
+| 每用户独立沙箱                | 满足用户上传代码和服务实例隔离。                         | 同进程 Cordis Context、`worker_threads` 和 Node.js `vm` 均不能作为不可信代码的隔离边界。                              |
+| PostgreSQL 主记录             | 归属关系、事件序号和安装状态可由事务与约束维护。         | MongoDB 虽能存事件文档，第一阶段仍需额外处理关系完整性与一致性。                                                      |
+| Redis 服务端 token 会话       | 直接支持过期、撤销和主动失效。                           | 纯无状态 JWT 要额外设计撤销机制；首期 PRD 已按短期服务端会话描述。                                                    |
+| S3 兼容对象存储               | 上传包与元数据分别保存，便于不可变对象管理。             | 将代码包存为 PostgreSQL 大字段会增大主库和备份负担。                                                                  |
+| NestJS 12                     | 与项目既定 NestJS 方向一致，且适合模块化 HTTP API。      | 单独使用 Fastify 需要另建身份与管理接口组织方式；NestJS 12 的代价是同步升级当前 TypeScript 5.9.3。                    |
 
-1. 登录成功后，API 签发 access token 并把短期会话写入 Redis。受保护请求携带 `Authorization: Bearer <token>`；API 验证后形成可信的 `userId`，再检查目标工作空间或资源权限。
-2. 插件上传先校验文件大小、格式、清单和摘要，再保存不可变包到对象存储并写入数据库修订版。数据库写入失败时删除对象或登记可靠清理任务。上传成功不执行代码。
-3. 用户启用本人修订版时，编排器为该用户启动或复用沙箱，装载插件并通过桥接协议登记工具。停用后撤销该工具视图，停止后续调用；在途调用的结算规则由 R-006 的 L3 PRD 固化。
-4. API 接收消息并校验会话归属，调用 runtime 的稳定入口。runtime 追加 `turn.started` 与 `user.message`，按事件投影组装模型输入，执行模型与工具循环。可见流片段先写入事件日志，再推送给 Web。
-5. 工具请求先记录，再向当前用户沙箱派发。结果明确时记录成功或失败；已派发但无法确认是否完成时记录 `tool.unknown` 并结束本回合，不自动重试。取消时停止后续派发、结算在途调用并写入 `turn.cancelled`。
+## 3. 模块设计与边界
 
-完整时序、事件词汇和类关系见 [Agent Harness 技术设计](./superpowers/specs/2026-10-01-agent-harness-design.md#运行流程时序图)；六个已定义的用户操作见[功能 PRD 导航](./superpowers/specs/2026-10-02-feature-sequence-diagrams.md)。
+| 模块                  | 一句话职责                                             | 分工边界                                                            |
+| --------------------- | ------------------------------------------------------ | ------------------------------------------------------------------- |
+| `apps/web`            | 展示身份、插件与聊天页面，提交请求并消费有序事件流。   | 只依赖 `contracts`，不连接数据库或持有平台密钥。                    |
+| `apps/api`            | 验证 token 和工作空间权限，处理 HTTP、上传与插件管理。 | 将可信 `ExecutionContext` 交给 runtime；不执行用户代码。            |
+| `apps/api` 编排入口   | 创建、复用和停止用户沙箱，装载已授权插件修订版。       | 独立进程持有容器管理权限，公网 API 与沙箱均不持有。                 |
+| `packages/ai-runtime` | 用 Cordis 组合模型、事件、Agent loop、工具视图与桥接。 | 可经 `db` 访问数据，但始终按可信用户和工作空间过滤；不依赖 NestJS。 |
+| `packages/db`         | 定义 PostgreSQL 表、迁移与共享访问基础。               | 不负责 HTTP 身份验证；提供可限定归属范围的访问方式。                |
+| `packages/contracts`  | 定义公开请求、响应、事件与校验规则。                   | 不包含数据库客户端、密钥、容器句柄或 Cordis Context。               |
+| `infra`               | 配置 PostgreSQL、Redis、对象存储和沙箱部署。           | 只放部署和示例配置，不放业务代码。                                  |
 
-## 接口草案
+API 从 token 得到 `userId`，再验证目标资源和工作空间；客户端参数、模型输出及插件返回值不能覆盖该身份。每位用户的沙箱有独立 Cordis 根上下文，只通过受版本约束的进程间协议暴露工具。上传成功仅保存修订版，启用才装载。已派发且结果未知的有副作用工具记录 `tool.unknown`，不自动重试。具体状态见[Agent 模块 PRD](./prd/modules/agent.md)和[插件模块 PRD](./prd/modules/plugins.md)。
 
-以下路径用于拆分实现任务；字段、状态码和路径在对应 L3 PRD 与 `contracts` 定稿后固定。
+## 4. 数据模型
 
-| 操作           | 建议接口                                                                  | 鉴权与主要返回                                                     |
-| -------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| 注册           | `POST /auth/register`                                                     | 无 token；返回用户 ID。                                            |
-| 登录           | `POST /auth/login`                                                        | 无 token；返回 `accessToken` 与有效期。                            |
-| 获取当前用户   | `GET /users/me`                                                           | Bearer token；返回当前用户公开资料。                               |
-| 插件列表       | `GET /plugins?cursor=...`                                                 | Bearer token；返回本人修订版和下一页游标。                         |
-| 上传插件       | `POST /plugins`                                                           | Bearer token；返回未启用修订版 ID 与摘要。                         |
-| 启用或停用插件 | `POST /plugins/{revisionId}/enable`、`POST /plugins/{revisionId}/disable` | Bearer token；先核对修订版归属，再返回安装状态。                   |
-| 对话列表       | `GET /workspaces/{workspaceId}/conversations?cursor=...`                  | Bearer token 与工作空间授权；返回会话摘要。                        |
-| 发送消息       | `POST /workspaces/{workspaceId}/turns`                                    | Bearer token 与会话授权；请求可携带已有会话 ID，响应为有序事件流。 |
-| 取消回合       | `POST /turns/{turnId}/cancel`                                             | Bearer token 与会话授权；返回最终结算状态。                        |
-| 读取事件       | `GET /conversations/{sessionId}/events?afterSeq=...`                      | Bearer token 与会话授权；用于重连补齐。                            |
+| 核心实体                   | 主要字段                                                        | 关系与约束                                              |
+| -------------------------- | --------------------------------------------------------------- | ------------------------------------------------------- |
+| `User`                     | `id`、`accountKey`、`displayName`、`passwordVerifier`           | 规范化账号标识唯一；拥有插件修订版和会话。              |
+| `Workspace` / `Membership` | `workspaceId`、`userId`、`role`                                 | 工作空间关联成员；创建与切换规则待功能 PRD 定稿。       |
+| `TokenSession`             | `tokenId`、`userId`、`expiresAt`、`revokedAt`                   | Redis 短期记录；过期或撤销后不能认证。                  |
+| `PluginRevision`           | `id`、`ownerUserId`、`name`、`version`、`sha256`、`artifactRef` | 修订版不可变；对象引用指向代码包。                      |
+| `PluginInstallation`       | `userId`、`revisionId`、`enabled`、`loadState`                  | 用户与修订版的安装关系；启用状态不修改包。              |
+| `Conversation`             | `id`、`ownerUserId`、`workspaceId`、`title`、`lastActivityAt`   | 一个会话有多个回合；同一时间仅一个活动回合。            |
+| `Turn` / `SessionEvent`    | `turnId`、`sessionId`；事件含 `seq`、`type`、`payload`          | `(sessionId, seq)` 唯一递增；回合最终只有一个结束事件。 |
+| `ToolInvocation`           | `id`、`turnId`、`revisionId`、`toolName`、`status`              | 关联回合与工具来源；最终结果为成功、失败或未知之一。    |
 
-## 数据模型草案
+除 `TokenSession` 在 Redis、代码包在对象存储外，主记录均在 PostgreSQL。会话、安装与工具调用都保留用户归属；涉及工作空间的记录还保留 `workspaceId`。列表用最近活动时间和 ID 稳定排序并采用游标分页。模型输入由事件投影得到，不另存一份独立消息历史。字段名为草案，以迁移和类型定义为准。
 
-| 主记录             | 关键字段或约束                                                                | 所属存储                 |
-| ------------------ | ----------------------------------------------------------------------------- | ------------------------ |
-| 用户与工作空间授权 | 用户 ID、唯一账号标识、密码验证材料；工作空间与成员关系。                     | PostgreSQL               |
-| token 会话         | token 标识、用户 ID、有效期与撤销状态。                                       | Redis                    |
-| 插件修订版         | 修订版 ID、ownerUserId、名称、版本、包摘要、对象引用；修订版不可变。          | PostgreSQL；包在对象存储 |
-| 插件安装           | 用户 ID、修订版 ID、启用状态及装载状态。                                      | PostgreSQL               |
-| 会话               | 会话 ID、ownerUserId、workspaceId、标题、最近活动时间；同会话只运行一个回合。 | PostgreSQL               |
-| 会话事件           | sessionId、单调 seq、事件类型与负载；`(sessionId, seq)` 唯一。                | PostgreSQL               |
-| 工具调用           | 调用 ID、会话与回合 ID、工具修订版、状态；结果恰为成功、失败或未知之一。      | PostgreSQL               |
+## 5. 接口清单
 
-数据库迁移先建立归属字段、唯一约束和必要索引；列表采用稳定排序与游标分页。业务查询始终带已认证用户范围，涉及工作空间的数据再带已授权工作空间范围。Redis 不是会话事件或插件修订版的主记录。
+路径目前为规划，尚无可访问端点。字段、错误码与流式事件结构先参照下表的功能文档，随后在 `packages/contracts` 固化请求、响应和事件类型。插件启停、Agent 回合与事件读取仍需补 L3 PRD；在补齐前，模块文档只定义边界，不视为完整字段契约。
 
-## 沙箱与故障处理
+| 方法   | 路径草案                                  | 一句话用途                                 | 字段依据                                                                          |
+| ------ | ----------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------- |
+| `POST` | `/auth/register`                          | 创建唯一账号。                             | [注册 PRD](./prd/features/register.md)                                            |
+| `POST` | `/auth/login`                             | 验证凭据并返回 access token。              | [登录 PRD](./prd/features/login.md)                                               |
+| `GET`  | `/users/me`                               | 凭 token 获取当前用户公开资料。            | [个人信息 PRD](./prd/features/get-profile.md)                                     |
+| `GET`  | `/plugins`                                | 分页获取本人插件修订版与启用状态。         | [插件列表 PRD](./prd/features/list-plugins.md)                                    |
+| `POST` | `/plugins`                                | 上传代码包并创建未启用修订版。             | [上传插件 PRD](./prd/features/upload-plugin.md)                                   |
+| `POST` | `/plugins/{revisionId}/enable`            | 验证归属后启用并装载个人插件。             | [插件模块 PRD](./prd/modules/plugins.md)，待补 L3                                 |
+| `POST` | `/plugins/{revisionId}/disable`           | 停用插件并撤销后续工具可见性。             | [插件模块 PRD](./prd/modules/plugins.md)，待补 L3                                 |
+| `GET`  | `/workspaces/{workspaceId}/conversations` | 分页获取当前用户在已授权工作空间中的对话。 | [对话列表 PRD](./prd/features/list-conversations.md)                              |
+| `POST` | `/workspaces/{workspaceId}/turns`         | 创建或续接会话回合并流式返回事件。         | [Agent 模块 PRD](./prd/modules/agent.md)，待补 L3                                 |
+| `POST` | `/turns/{turnId}/cancel`                  | 取消当前用户有权操作的回合。               | [Agent 模块 PRD](./prd/modules/agent.md)，待补 L3                                 |
+| `GET`  | `/conversations/{sessionId}/events`       | 按事件序号读取事件以供重连补齐。           | [Agent 技术设计](./superpowers/specs/2026-10-01-agent-harness-design.md)，待补 L3 |
 
-每个用户拥有独立工作负载、Cordis 根上下文和插件服务实例，同一用户多个会话可以复用。沙箱使用非特权身份、只读基础文件系统、受限临时目录、默认拒绝外部网络以及 CPU、内存和执行时间配额；不挂载宿主机控制接口。容器编排权限只属于可信编排进程。运行时具体选型和隔离强度需在部署环境验证后定稿。
+受保护接口均携带登录返回的 `Authorization: Bearer <token>`。API 从服务端 token 会话确定用户，仍须单独校验插件、会话及工作空间归属。
 
-桥接协议至少包含协议版本、可信目标用户、工具名与版本、输入 schema、调用 ID、截止时间和结构化结果。平台验证插件声明与输出的大小和格式，向模型提供过滤后的结果。工具断连时根据是否已派发及是否能确认结果记录 `failed` 或 `unknown`；不对未知且可能有副作用的调用自动重试。
+## 6. 依赖清单
 
-## 实施顺序与交付门槛
+“拟采用”依赖尚未安装，版本范围是实施约束。安装时锁定精确 patch 和 `pnpm-lock.yaml`；服务镜像固定可复现标签或摘要。升级前逐项核对兼容性与测试。
 
-| 顺序 | 工作包                                                                        | 完成门槛                                                       |
-| ---- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| 1    | 定稿缺失的 L3 PRD、工作空间规则与公开契约；建立应用入口、环境示例和基础迁移。 | 六个现有 PRD 与新增 PRD 的接口字段一致，服务可本地启动。       |
-| 2    | 实现注册、登录、token 校验、当前用户与权限上下文。                            | R-001 至 R-003、Q-001 的认证用例通过。                         |
-| 3    | 实现插件上传、列表、启停、对象清理和用户沙箱装载。                            | R-004 至 R-006、Q-002 至 Q-004 的插件隔离用例通过。            |
-| 4    | 实现事件存储、模型适配、Agent 循环、工具桥接、取消和重连。                    | R-007、R-008、R-010 的闭环、故障和重放用例通过。               |
-| 5    | 完成对话列表及 Web 页面，做两用户端到端隔离测试。                             | R-009 与全部 P0 需求验收通过；格式、lint、构建及部署检查通过。 |
+| 依赖                                       | 使用位置                | 版本要求 / 当前状态                                                                          | 升级核对点                                             |
+| ------------------------------------------ | ----------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Node.js                                    | Web、API、runtime、沙箱 | 拟采用 24 LTS；使用 Nest CLI 生成器时至少 24.15。                                            | ESM、构建、核心与沙箱 Node 版本一致性。                |
+| pnpm                                       | 全仓库                  | 已声明 11.5.2；锁文件已有。                                                                  | workspace 解析及锁文件变化。                           |
+| TypeScript                                 | 全仓库                  | 已安装 5.9.3；采用 NestJS 12 前升级到兼容的 6.x。                                            | `contracts` 导出、Nest 编译和跨包类型检查。            |
+| Next.js / React / React DOM                | `apps/web`              | 拟采用 Next 16.x、React/React DOM 19.x；未安装。                                             | 框架与 React 适配、聊天流和构建。                      |
+| NestJS 核心及平台适配器                    | `apps/api`              | 拟采用同一 12.x 系列；未安装。                                                               | 全部 `@nestjs/*` 主版本一致，守卫、上传和 ESM。        |
+| Cordis                                     | 核心及每用户沙箱        | 候选 `cordis@4.0.0-rc.10`，须精确锁定并做集成试验；未安装。                                  | 核心/沙箱版本一致，服务注入与插件卸载。                |
+| `pg`、`redis`、`@aws-sdk/client-s3`、`zod` | DB、API、contracts      | 拟采用 8.x、6.x、3.x、4.x；未安装。                                                          | 连接池、token TTL、对象清理和协议校验。                |
+| PostgreSQL                                 | 主记录与会话事件        | 拟采用 17.x；部署时固定受支持的 minor。                                                      | 迁移、唯一约束、分页索引和事件重放。                   |
+| Redis Open Source                          | token 会话与短期协调    | 拟采用 7.4.x 扩展维护系列，与候选 `redis` 6 客户端的官方支持范围一致。                       | TTL、撤销和客户端兼容。                                |
+| S3 兼容对象存储                            | 插件包                  | 兼容 S3 API `2006-03-01` 的对象写入、读取和删除；服务商及部署版本待选，选定后固定。          | 摘要一致性、访问权限与失败清理。                       |
+| Docker Engine / Linux 宿主                 | 用户沙箱                | Docker 29.8.2 候选；宿主须支持非特权运行与资源、网络限制。                                   | CPU/内存配额、网络默认拒绝、宿主控制接口不可见。       |
+| 模型服务                                   | Agent 生成              | 供应方与 API 版本待定；适配器须支持流式回复及工具请求。                                      | 超时、取消、工具格式和重试语义。                       |
+| 内部 workspace 包                          | Web、API、runtime       | `@ai-harness/contracts`、`db`、`ai-runtime` 当前包版本均为 `0.0.0`，引用使用 `workspace:*`。 | 遵守[项目协作说明](../AGENTS.md)的依赖方向和公开入口。 |
 
-## 待定决策
-
-- 首版账号标识目前按邮箱草拟；需确定验证和规范化规则。
-- 工作空间的创建、默认选择及切换规则尚未形成独立 PRD。
-- token 的有效期、撤销语义与客户端保存方式需和威胁模型一起定稿。
-- 插件包清单、允许的运行能力、大小上限和具体沙箱运行时需在上传与启用 PRD 中固定。
-- 模型供应方、流式传输协议与服务部署规模由实现阶段选型；不得改变已确认的事件顺序和用户隔离边界。
+版本依据：[Node.js 发布状态](https://nodejs.org/en/about/previous-releases)、[Next.js 安装要求](https://nextjs.org/docs/app/getting-started/installation)、[NestJS 运行要求](https://docs.nestjs.com/first-steps)与[版本迁移](https://docs.nestjs.com/migration-guide)、[Cordis 上游包](https://github.com/cordiverse/cordis/blob/main/packages/core/package.json)、[PostgreSQL 支持周期](https://www.postgresql.org/support/versioning/)、[Redis 版本维护](https://redis.io/docs/latest/operate/oss_and_stack/install/version-mgmt/)与[客户端支持范围](https://www.npmjs.com/package/redis)、[S3 客户端与 API 版本](https://www.npmjs.com/package/@aws-sdk/client-s3)、[Docker Engine 29 发布说明](https://docs.docker.com/engine/release-notes/29/)。
