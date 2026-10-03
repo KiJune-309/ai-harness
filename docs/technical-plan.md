@@ -2,50 +2,41 @@
 
 状态：设计草案。更新日期：2026-10-02。范围对应[需求清单](./requirements-checklist.md)的 P0 项与[项目总体 PRD](./prd/project.md)。仓库目前只有 workspace 骨架和工程工具；下文业务接口、数据库表和沙箱尚未实现。“拟采用”版本须经集成测试后写入清单并精确锁定。
 
-## 1. 整体架构图
+## 1. 整体架构结构图
 
 ```mermaid
-flowchart LR
-    U["用户浏览器"]
-    subgraph App["应用层"]
-        W["apps/web<br/>Next.js 页面"]
-        A["apps/api<br/>NestJS HTTP / 身份与授权"]
-        O["apps/api 独立进程入口<br/>沙箱编排"]
-    end
-    subgraph Core["可信执行层"]
-        R["packages/ai-runtime<br/>Cordis + Agent 循环 + 工具桥接"]
-        D["packages/db<br/>迁移与数据库访问"]
-        C["packages/contracts<br/>公开类型与校验"]
-    end
-    subgraph UserCode["用户代码层"]
-        S["每用户独立沙箱<br/>Cordis 根上下文与插件服务"]
-    end
-    subgraph Infra["数据与外部依赖"]
-        P[("PostgreSQL<br/>用户、插件、会话事件")]
-        X[("Redis<br/>token 会话、短期协调")]
-        B[("对象存储<br/>插件代码包")]
-        M["模型服务"]
-    end
-    U -->|页面操作| W
-    W -->|HTTPS / Bearer token / 事件流| A
-    A -->|可信用户与工作空间上下文| R
-    A -->|启停插件| O
-    A -->|token 会话| X
-    O -->|短期租约| X
-    A -->|上传代码包| B
-    A -->|业务读写| D
-    R -->|事件读写| D
-    D --> P
-    R -->|模型请求与回复| M
-    R -->|受版本约束的工具协议| S
-    O -->|启动、装载、停止| S
-    O -->|读取已授权修订版| B
-    W -.->|共享契约| C
-    A -.->|共享契约| C
-    R -.->|共享契约| C
+graph TB
+    platform["AI Agent 平台"]
+
+    clientLayer["客户端"]
+    trustedLayer["可信服务端"]
+    sandboxLayer["用户隔离执行区"]
+    dependencyLayer["数据与外部依赖"]
+
+    platform --- clientLayer
+    platform --- trustedLayer
+    platform --- sandboxLayer
+    platform --- dependencyLayer
+
+    clientLayer --- web["apps/web：Next.js 界面"]
+
+    trustedLayer --- api["apps/api：HTTP、身份与授权"]
+    trustedLayer --- orchestrator["apps/api 独立进程入口：沙箱编排"]
+    trustedLayer --- runtime["packages/ai-runtime：Cordis 与 Agent"]
+    trustedLayer --- contracts["packages/contracts：共享类型与校验"]
+    trustedLayer --- database["packages/db：表结构与数据库访问"]
+
+    sandboxLayer --- sandboxA["用户 A 沙箱：独立 Cordis 与插件服务"]
+    sandboxLayer --- sandboxB["用户 B 沙箱：独立 Cordis 与插件服务"]
+
+    dependencyLayer --- infra["infra：部署与运行配置"]
+    infra --- postgres[("PostgreSQL：业务与会话事件")]
+    infra --- redis[("Redis：token 会话与短期状态")]
+    infra --- objectStore[("对象存储：插件代码包")]
+    dependencyLayer --- model["模型服务"]
 ```
 
-登录由 API 签发 access token，并在 Redis 保存短期会话。后续请求携带 token，API 验证身份与资源权限后将可信上下文交给 runtime。插件上传写入对象存储与 PostgreSQL；启用时由编排进程装载进该用户沙箱。runtime 请求模型，并通过桥接协议调用当前用户工具；可见回复先写入 PostgreSQL 事件日志，再发送给 Web。完整回合见[Agent 时序图](./superpowers/specs/2026-10-01-agent-harness-design.md#运行流程时序图)。
+图中连线仅表示层级归属，不表示执行顺序。Web 只依赖公开契约并调用 API；API 负责身份和授权，runtime 负责 Agent 执行，编排入口管理用户沙箱。PostgreSQL 保存业务主记录与会话事件，Redis 保存短期状态，对象存储保存插件代码包；每位用户的沙箱拥有独立 Cordis 根上下文和插件服务。请求与数据流见[Agent 时序图](./superpowers/specs/2026-10-01-agent-harness-design.md#运行流程时序图)及各功能 PRD。
 
 ## 2. 技术选型表
 
