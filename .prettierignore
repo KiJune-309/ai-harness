@@ -1,0 +1,9 @@
+node_modules/
+.pnpm-store/
+.idea/
+**/.next/
+**/dist/
+**/build/
+**/coverage/
+**/out/
+pnpm-lock.yaml

@@ -1,0 +1,11 @@
+{
+    "name": "@ai-harness/api",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "dependencies": {
+        "@ai-harness/contracts": "workspace:*",
+        "@ai-harness/core": "workspace:*",
+        "@ai-harness/db": "workspace:*"
+    }
+}

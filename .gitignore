@@ -1,0 +1,12 @@
+node_modules/
+.pnpm-store/
+.idea/
+**/.next/
+**/dist/
+**/build/
+**/coverage/
+**/out/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example

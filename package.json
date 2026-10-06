@@ -1,0 +1,43 @@
+{
+    "name": "ai-harness",
+    "private": true,
+    "version": "1.0.0",
+    "description": "AI chat monorepo",
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "devEngines": {
+        "packageManager": {
+            "name": "pnpm",
+            "version": "11.5.2",
+            "onFail": "download"
+        }
+    },
+    "type": "module",
+    "scripts": {
+        "commit": "node scripts/commit.mjs",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "lint": "eslint . --max-warnings=0",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier . --write",
+        "format:check": "prettier . --check",
+        "prepare": "husky"
+    },
+    "devDependencies": {
+        "@commitlint/cli": "^21.2.3",
+        "@commitlint/config-conventional": "^21.2.3",
+        "@eslint/js": "^9.39.5",
+        "@next/eslint-plugin-next": "^16.3.6",
+        "@types/node": "^26.6.3",
+        "eslint": "^9.39.5",
+        "eslint-config-prettier": "^10.1.8",
+        "eslint-plugin-react-hooks": "^7.1.1",
+        "husky": "^9.1.7",
+        "lint-staged": "^17.6.0",
+        "prettier": "^3.9.9",
+        "typescript": "^5.9.3",
+        "typescript-eslint": "^8.70.1",
+        "vitest": "^5.0.3"
+    }
+}
