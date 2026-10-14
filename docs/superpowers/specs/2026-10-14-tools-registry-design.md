@@ -1,11 +1,11 @@
 # Tools 定义与 ToolRegistry 软件设计文档
 
-日期：2026-10-14  
-状态：待评审  
-模块：`packages/core/tools`  
-实现状态：尚未开始
+- 日期：2026-10-14
+- 状态：已确认
+- 模块：`packages/core/tools`
+- 实现状态：五项任务实现与本地验收完成，待整体审阅
 
-本模块为服务端工具提供统一定义方式，并通过 `ToolRegistry` 管理工具的注册、列举、查询和删除。第一版围绕工具定义与集合管理展开，注册表的公开方法按需求命名为 `registry`、`list`、`get` 和 `delete`。
+本模块为服务端工具提供统一定义方式，并通过 `ToolRegistry` 管理工具的注册、列举、查询、删除和模型描述导出。第一版围绕工具定义与集合管理展开，注册表的公开方法为 `registry`、`list`、`get`、`delete` 和 `schemas`。
 
 ## 需求与范围
 
@@ -18,33 +18,13 @@
 | R3   | `ToolRegistry.list` 列举工具     | 返回当前实例的全部工具，调用方可读取工具定义与执行入口。                                    |
 | R4   | `ToolRegistry.get` 查询工具      | 根据工具名称返回对应工具；名称不存在时返回 `undefined`。                                    |
 | R5   | `ToolRegistry.delete` 删除工具   | 根据工具名称移除注册项，返回是否成功删除。                                                  |
+| R6   | `ToolRegistry.schemas` 导出描述  | 返回所有已注册工具的名称、描述和参数 JSON Schema，供调用方传给模型。                        |
 
 以上方法的具体返回值、批量注册行为和错误语义采用下文的设计方案，随本 SDD 一起评审。
 
-### 第一版配套设计
-
-统一定义方式包含名称唯一性、定义校验、参数与输出校验，以及模型描述和执行函数的分离。这些规则保证注册后的工具可以安全地被宿主查找和调用。
-
-`ToolRegistry` 在第一版管理工具集合。宿主通过 `get` 获取工具并调用其执行入口；模型调用解析、统一执行结果、调度、超时和重试属于后续功能。工具结果回填与下一次模型请求由调用方负责。
-
-## 当前项目与参考实现
-
-`packages/core/tools` 当前为空。`packages/core/LLM/schemas.ts` 已引用该模块的 `toolSchema` 和 `toolCallSchema`；LLM 入口和 provider 测试也已引用模型侧 `ToolDefinition` 和 `ToolCall`，但 `LLM/types.ts` 尚未导出这两个类型。
-
-现有根目录 `AGENTS.md` 与 `packages/core/LLM/AGENTS.md` 已描述工具执行职责。实现第一版时需要将其中尚未实现的注册表执行、`schemas()` 调用等内容标为后续能力，保证文档与实际入口一致。工具执行仍归属 tools 模块，模型协议转换归属 LLM 模块，这一职责划分保持不变。
-
-DeepSeek Harness 使用 `defineTool` 声明工具，通过 `ToolRuntime.register` 管理注册，并通过 `schemas` 导出模型可见描述。其定义采用自定义 schema DSL，注册运行时还包含作用域、策略钩子和执行流水线。本项目借鉴定义与注册分离的结构，沿用已有 Zod 依赖。
-
-参考来源：
-
-- [DeepSeek Harness tools 模块说明](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/core/tools)
-- [DeepSeek defineTool 源码](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tools/src/schema.ts)
-- [DeepSeek 注册与执行运行时源码](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/tools/src/index.ts)
-- [Zod JSON Schema 文档](https://zod.dev/json-schema)
-
 ## 架构与职责
 
-工具作者将定义交给 `defineTool`。该函数生成模型可见描述并包装参数、输出校验，返回标准工具对象。宿主创建 `ToolRegistry` 实例，将这些对象注册进去，然后使用集合管理方法查询或移除它们。
+工具作者将定义交给 `defineTool`。该函数生成模型可见描述并包装参数、输出校验，返回标准工具对象。宿主创建 `ToolRegistry` 实例，将这些对象注册进去，然后使用集合管理方法查询或移除它们，并通过 `schemas()` 导出模型可见描述。
 
 ```text
 工具作者的 Zod 定义和执行函数
@@ -57,11 +37,12 @@ DeepSeek Harness 使用 `defineTool` 声明工具，通过 `ToolRuntime.register
               │
         实例内部的 Map
               │
-     list / get / delete
+ list / get / delete / schemas
 ```
 
-- 工具定义和注册表位于现有 `@ai-harness/core` 包内，沿用同包相对导入。
+- 工具定义和注册表位于现有 `@ai-harness/core` 包内，tools 内部沿用相对导入。
 - tools 模块不依赖 LLM provider、NestJS 或 `apps/api`。
+- LLM 不依赖 tools 的类型、schema 或执行入口；两个模块分别定义各自的协议，调用方适配模型侧描述并处理返回调用。
 - API 验证身份、工作空间权限和插件授权，再将可信执行上下文交给工具调用方。注册成功不代表当前用户获得操作授权。
 - 工具实现按工作空间范围读写数据，凭据由服务端闭包或依赖注入提供。
 - 每个注册表实例持有独立的进程内集合。宿主按生命周期复用实例，并为每次执行传递当前上下文；不使用模块级全局单例或数据库持久化注册表。
@@ -96,7 +77,7 @@ DeepSeek Harness 使用 `defineTool` 声明工具，通过 `ToolRuntime.register
 
 `defineTool` 返回 `Tool`：包含 `ToolSchema` 的三个描述字段及包装后的 `execute` 入口。参数与输出的原始 Zod schema 由包装器保留在内部，输出声明暂不加入 provider 的模型描述。
 
-工具作者使用 `z.strictObject` 或等价的严格对象 schema 定义参数根对象。`defineTool` 拒绝默认剥离未知字段的 `z.object`、允许额外字段的对象及根级 catchall，不自动改变作者提供的 schema。嵌套对象遵循各自声明的未知字段规则。
+工具作者使用 `z.strictObject` 或等价的严格对象 schema 定义参数根对象。`defineTool` 拒绝默认剥离未知字段的 `z.object`、允许额外字段的对象及允许额外参数的根级 catchall，不自动改变作者提供的 schema。嵌套对象遵循各自声明的未知字段规则。
 
 定义阶段校验名称、描述、schema 与执行函数，并生成 JSON Schema。参数按输入形式生成 JSON Schema；输出按输出形式检查其 JSON 表达能力。第一版支持可转换的基础 JSON 类型、枚举、对象、数组及组合，拒绝 Date、函数和无法表达的转换等定义。不通过忽略转换错误的方式生成不准确的模型描述。自定义 refinement 可能提供 JSON Schema 无法表达的额外约束，运行时仍按原始 Zod schema 执行这些校验；工具描述应说明调用方需要了解的业务条件。
 
@@ -114,7 +95,7 @@ DeepSeek Harness 使用 `defineTool` 声明工具，通过 `ToolRuntime.register
 
 ### 工具调用协议
 
-为兼容当前 LLM，`ToolCall` 与 `toolCallSchema` 继续使用以下形状：
+`packages/core/LLM` 已独立定义 `ToolCall` 与 `toolCallSchema`，其模型返回协议使用以下形状：
 
 ```ts
 type ToolCall = {
@@ -127,18 +108,19 @@ type ToolCall = {
 }
 ```
 
-`arguments` 保存模型返回的原始 JSON 字符串。第一版的注册表方法不解析此协议；调用方解析参数后再调用从 `get` 得到的工具。
+`arguments` 保存模型返回的原始 JSON 字符串。tools 不定义或导出该协议，注册表方法也不解析它；调用方读取函数名称、解析参数，再调用从 `get` 得到的工具。
 
 ## ToolRegistry 接口
 
 `new ToolRegistry()` 创建空注册表，内部使用 `Map<string, Tool>` 保存工具。全部管理方法都是同步方法，不触发工具执行或网络请求。
 
-| 方法       | 参数                             | 返回值              | 行为                                                |
-| ---------- | -------------------------------- | ------------------- | --------------------------------------------------- |
-| `registry` | 单个 `Tool` 或 `readonly Tool[]` | `void`              | 注册一个或一组工具，全部成功后修改集合。            |
-| `list`     | 无                               | `readonly Tool[]`   | 按注册顺序返回全部工具的新数组。                    |
-| `get`      | `name: string`                   | `Tool \| undefined` | 精确匹配名称，返回已注册工具。                      |
-| `delete`   | `name: string`                   | `boolean`           | 移除命中项，已删除返回 `true`，不存在返回 `false`。 |
+| 方法       | 参数                             | 返回值                  | 行为                                                |
+| ---------- | -------------------------------- | ----------------------- | --------------------------------------------------- |
+| `registry` | 单个 `Tool` 或 `readonly Tool[]` | `void`                  | 注册一个或一组工具，全部成功后修改集合。            |
+| `list`     | 无                               | `readonly Tool[]`       | 按注册顺序返回全部工具的新数组。                    |
+| `get`      | `name: string`                   | `Tool \| undefined`     | 精确匹配名称，返回已注册工具。                      |
+| `delete`   | `name: string`                   | `boolean`               | 移除命中项，已删除返回 `true`，不存在返回 `false`。 |
+| `schemas`  | 无                               | `readonly ToolSchema[]` | 按注册顺序返回全部工具的模型可见描述快照。          |
 
 ### 注册规则
 
@@ -156,6 +138,18 @@ type ToolCall = {
 空注册表的 `list()` 返回空数组。返回数组与内部集合分离，调用方修改数组不能改变注册表；其中的工具引用与 `get(name)` 返回的引用一致。
 
 列表顺序为当前工具的注册顺序；批量注册遵循数组顺序。查询名称使用精确字符串匹配，不执行归一化。不存在、空字符串或格式不匹配的名称均视为未命中，返回 `undefined`。
+
+### 模型描述导出
+
+`schemas()` 为每个已注册工具提取 `name`、`description` 和 `parameters`，返回纯 JSON 描述数组。`list()` 返回包含执行入口的服务端工具对象，`schemas()` 返回用于模型请求的工具说明。
+
+- 空注册表返回空数组，结果顺序与同一时刻的 `list()` 一致。
+- 每次调用返回新数组、新描述对象和深拷贝的参数 JSON Schema；修改返回数组、描述字段或嵌套参数不能改变已登记工具，也不能影响后续导出。
+- 导出采用字段白名单，不包含 `execute`、原始 Zod schema、执行上下文、服务端依赖或输出声明。
+- 方法读取当前注册集合。注册或删除后再次调用即可得到最新描述；此前返回的快照保持原内容。
+- 方法不触发工具执行、模型请求或权限校验。宿主向模型提供描述前，须确保该注册表的工具集合符合当前调用方的授权范围。
+
+调用方将这些描述按 LLM 自身的 `ToolDefinition` 协议适配后传入 `options.tools`。tools 导出的是本模块定义的 `ToolSchema`，LLM 继续独立定义自己的类型与 schema，两个模块不因此新增导入依赖。
 
 ### 删除与生命周期
 
@@ -175,55 +169,46 @@ type ToolCall = {
 
 ## 文件与兼容性
 
-| 文件                                | 职责                                                         |
-| ----------------------------------- | ------------------------------------------------------------ |
-| `packages/core/tools/schemas.ts`    | `toolSchema`、`toolCallSchema` 及相关结构校验。              |
-| `packages/core/tools/types.ts`      | `ToolSchema`、`ToolCall`、`Tool`、定义配置与执行上下文类型。 |
-| `packages/core/tools/defineTool.ts` | 类型推导、定义校验、JSON Schema 生成和参数及输出校验包装。   |
-| `packages/core/tools/registry.ts`   | `ToolRegistry` 与四个集合管理方法。                          |
-| `packages/core/tools/errors.ts`     | 定义错误、重复名称错误及带阶段信息的校验错误。               |
-| `packages/core/tools/index.ts`      | 公共类型、schema、定义入口、注册表与错误导出。               |
-| `packages/core/tools/*.test.ts`     | 工具定义及注册表的行为测试。                                 |
+| 文件                                | 职责                                                       |
+| ----------------------------------- | ---------------------------------------------------------- |
+| `packages/core/tools/schemas.ts`    | `toolSchema` 及工具定义的相关结构校验。                    |
+| `packages/core/tools/types.ts`      | `ToolSchema`、`Tool`、定义配置与执行上下文类型。           |
+| `packages/core/tools/defineTool.ts` | 类型推导、定义校验、JSON Schema 生成和参数及输出校验包装。 |
+| `packages/core/tools/registry.ts`   | `ToolRegistry` 的集合管理与模型描述导出方法。              |
+| `packages/core/tools/errors.ts`     | 定义错误、重复名称错误及带阶段信息的校验错误。             |
+| `packages/core/tools/json.ts`       | 内部 JSON 无损校验、深拷贝和递归冻结辅助函数。             |
+| `packages/core/tools/index.ts`      | 公共类型、schema、定义入口、注册表与错误导出。             |
+| `packages/core/tools/*.test.ts`     | 工具定义及注册表的行为测试。                               |
 
-LLM 的 `ToolDefinition` 保留为模型描述 `ToolSchema` 的兼容别名，可执行工具统一命名为 `Tool`，避免同名概念混淆。实现时补齐 `LLM/types.ts` 中的 `ToolDefinition` 和 `ToolCall` 导出，使已有引用可解析；provider 的请求转换继续消费现有三个模型描述字段。
+LLM 的 `ToolDefinition` 和 `ToolCall` 由 LLM 本地 schema 推导，保持现有导出和 provider 行为；它们不是 tools 类型的别名。tools 独立定义 `ToolSchema`，可执行工具命名为 `Tool`。实现 tools 时不改变 LLM 的导入或导出边界。
 
-第一版的 `list()` 返回服务端工具对象，包含执行函数。调用方需要传给 LLM 时显式提取 `name`、`description`、`parameters`；传入 provider 或公开 API 响应的对象必须满足 `ToolSchema`。模型侧 JSON Schema 格式使用当前 provider 可接收的 object 描述，具体 provider 转换留在 LLM 内。
+第一版的 `list()` 返回服务端工具对象，包含执行函数；`schemas()` 统一导出 `name`、`description`、`parameters`。调用方将导出结果按 LLM 的 `ToolDefinition` 协议适配；公开 API 响应另按共享响应契约组织，不传执行函数、上下文或凭据。工具描述采用 provider 可接收的 object JSON Schema，具体 provider 转换留在 LLM 内。
 
 函数与公开方法按仓库要求编写 JSDoc/TSDoc，说明用途、参数、返回值、副作用和异常。实现完成时同步更新根目录及 LLM 的协作文档，保留已实现与后续能力的区分。
 
 ## 验收与验证
 
-| 场景                              | 预期结果                                                 |
-| --------------------------------- | -------------------------------------------------------- |
-| 定义有效工具                      | 得到模型描述与可调用的标准工具，参数和返回值类型可推导。 |
-| 名称、描述或 schema 无效          | 定义阶段失败，不产生可注册对象。                         |
-| 输入缺少必填项或包含未声明参数    | 包装执行拒绝，工具实现未被调用。                         |
-| 输出不符合声明或工具抛出异常      | 包装执行拒绝，宿主可区分校验失败与工具异常。             |
-| 输入 signal 已取消                | 工具实现未被调用。                                       |
-| 异步参数校验期间取消              | 校验后不调用工具实现。                                   |
-| 注册单个或一组工具                | `get` 和 `list` 可读取全部注册项，顺序稳定。             |
-| 批次末尾存在重复项或无效项        | 整个批次失败，前面的新工具也未加入。                     |
-| 使用空批次                        | 注册表状态不变。                                         |
-| 修改原定义或返回列表              | 已登记工具的描述及注册表成员不变。                       |
-| 未命中查询或删除                  | 分别得到 `undefined` 和 `false`。                        |
-| 删除后重新注册                    | 工具恢复可查询，出现在列表末尾。                         |
-| 创建两个注册表                    | 注册、删除及列表互不影响。                               |
-| LLM 兼容导出与 mock provider 用例 | 现有工具描述、调用协议及 provider 转换保持兼容。         |
+| 场景                              | 预期结果                                                                      |
+| --------------------------------- | ----------------------------------------------------------------------------- |
+| 定义有效工具                      | 得到模型描述与可调用的标准工具，参数和返回值类型可推导。                      |
+| 名称、描述或 schema 无效          | 定义阶段失败，不产生可注册对象。                                              |
+| 输入缺少必填项或包含未声明参数    | 包装执行拒绝，工具实现未被调用。                                              |
+| 输出不符合声明或工具抛出异常      | 包装执行拒绝，宿主可区分校验失败与工具异常。                                  |
+| 输入 signal 已取消                | 工具实现未被调用。                                                            |
+| 异步参数校验期间取消              | 校验后不调用工具实现。                                                        |
+| 注册单个或一组工具                | `get` 和 `list` 可读取全部注册项，顺序稳定。                                  |
+| 批次末尾存在重复项或无效项        | 整个批次失败，前面的新工具也未加入。                                          |
+| 使用空批次                        | 注册表状态不变。                                                              |
+| 修改原定义或返回列表              | 已登记工具的描述及注册表成员不变。                                            |
+| 未命中查询或删除                  | 分别得到 `undefined` 和 `false`。                                             |
+| 删除后重新注册                    | 工具恢复可查询，出现在列表末尾。                                              |
+| 创建两个注册表                    | 注册、删除及列表互不影响。                                                    |
+| 导出模型描述                      | 结果仅包含三个描述字段，顺序与 `list()` 一致，没有执行函数或原始 Zod schema。 |
+| 修改导出描述的嵌套参数            | 已登记工具和后续 `schemas()` 结果不受影响。                                   |
+| 空注册表导出描述                  | 返回空数组。                                                                  |
+| 注册或删除后再次导出              | 新结果反映当前集合，此前返回的快照保持不变。                                  |
+| LLM 独立协议与 mock provider 用例 | 现有工具描述、调用协议及 provider 转换保持兼容，不导入 tools。                |
 
 实现阶段使用本地工具与模拟响应验证，不需要真实模型凭据。类型检查覆盖定义入口的参数推导、输出类型及异构工具集合的管理，不以强制类型断言替代这些契约。
 
 仓库检查包括 core 类型检查、tools 测试、现有 mock provider 测试，以及 `pnpm format:check` 和 `pnpm lint`。这份 SDD 的交付检查包括需求覆盖、接口一致性、范围审阅和 Markdown 格式检查。
-
-## 建议的后续功能
-
-以下功能单独评审，不作为第一版验收条件：
-
-| 优先级 | 功能                      | 用途                                                                       |
-| ------ | ------------------------- | -------------------------------------------------------------------------- |
-| 高     | `schemas()`               | 集中导出模型描述，减少调用方反复提取字段，也避免混入执行入口。             |
-| 高     | 统一单次执行入口          | 集中解析 `ToolCall`、处理未知工具、校验参数，并返回一致的成功或失败结果。  |
-| 中     | `has(name)` 与只读 `size` | 简化存在性检查和工具数量展示；当前可由 `get` 与 `list` 实现。              |
-| 中     | 按可信上下文过滤可用工具  | 为不同工作空间或授权范围生成合适的工具集合，并在执行入口采用同一过滤规则。 |
-| 后续   | 超时、执行事件和并发分类  | 在形成统一执行入口后支持生命周期观测及调度策略。                           |
-
-建议下一步优先补充 `schemas()`；统一执行入口可随后设计。`clear()`、覆盖式注册、自动发现和持久化注册表暂不增加，已有四个方法足以支撑第一版工具集合管理。
