@@ -1,7 +1,23 @@
-import { ChatOptions, ChatResponse, Message, StreamResponse } from '../types.ts'
-import { ChatProvider } from './baseProvider.ts'
+import type { ChatOptions, ChatResponse, Message, StreamResponse } from '../types.ts'
+import { LLMProvider } from './baseProvider.ts'
 
-export class OpenAIProvider extends ChatProvider {
+const serializeMessages = (messages: readonly Message[]) =>
+    messages.map(message => {
+        if (message.role === 'assistant') {
+            return { role: message.role, content: message.content, tool_calls: message.tool_calls }
+        }
+        if (message.role === 'tool') {
+            return { role: message.role, content: message.content, tool_call_id: message.tool_call_id }
+        }
+        return { role: message.role, content: message.content }
+    })
+
+const serializeTools = (options?: ChatOptions) =>
+    options?.tools?.length
+        ? options.tools.map(({ name, description, parameters }) => ({ type: 'function', function: { name, description, parameters } }))
+        : undefined
+
+export class OpenAIProvider extends LLMProvider {
     async chat(messages: readonly Message[], options?: ChatOptions): Promise<ChatResponse> {
         const baseUrl = (this.config.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
         const timeout = AbortSignal.timeout(this.config.timeoutMs ?? 60_000)
@@ -14,7 +30,8 @@ export class OpenAIProvider extends ChatProvider {
             },
             body: JSON.stringify({
                 model: this.config.model,
-                messages: messages.map(({ role, content }) => ({ role, content })),
+                messages: serializeMessages(messages),
+                tools: serializeTools(options),
                 max_completion_tokens: this.config.maxTokens,
                 temperature: this.config.temperature,
                 stream: false,
@@ -40,7 +57,8 @@ export class OpenAIProvider extends ChatProvider {
             },
             body: JSON.stringify({
                 model: this.config.model,
-                messages: messages.map(({ role, content }) => ({ role, content })),
+                messages: serializeMessages(messages),
+                tools: serializeTools(options),
                 max_completion_tokens: this.config.maxTokens,
                 temperature: this.config.temperature,
                 stream: true,

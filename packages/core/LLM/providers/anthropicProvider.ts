@@ -1,7 +1,69 @@
-import type { AnthropicChatResponse, AnthropicStreamResponse, ChatResponse, StreamResponse, ChatOptions, Message } from '../types.ts'
-import { ChatProvider } from './baseProvider.ts'
+import type {
+    AnthropicChatResponse,
+    AnthropicContentBlock,
+    AnthropicStreamResponse,
+    ChatResponse,
+    StreamResponse,
+    ChatOptions,
+    Message,
+    ToolCall,
+} from '../types.ts'
+import { LLMProvider } from './baseProvider.ts'
 
-export class AnthropicProvider extends ChatProvider {
+interface AnthropicToolResultBlock {
+    type: 'tool_result'
+    tool_use_id: string
+    content: string
+}
+
+interface AnthropicRequestMessage {
+    role: 'user' | 'assistant'
+    content: string | (AnthropicContentBlock | AnthropicToolResultBlock)[]
+}
+
+const toToolUseBlock = (call: ToolCall): AnthropicContentBlock => {
+    const input: unknown = JSON.parse(call.function.arguments)
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+        throw new Error(`Tool call '${call.id}' arguments must be a JSON object`)
+    }
+    return { type: 'tool_use', id: call.id, name: call.function.name, input: input as Record<string, unknown> }
+}
+
+const toAnthropicMessages = (messages: readonly Message[]): AnthropicRequestMessage[] => {
+    const converted: AnthropicRequestMessage[] = []
+    let toolResults: AnthropicToolResultBlock[] | undefined
+
+    for (const message of messages) {
+        if (message.role === 'system') continue
+        if (message.role === 'tool') {
+            if (!toolResults) {
+                toolResults = []
+                converted.push({ role: 'user', content: toolResults })
+            }
+            toolResults.push({ type: 'tool_result', tool_use_id: message.tool_call_id, content: message.content })
+            continue
+        }
+
+        toolResults = undefined
+        if (message.role === 'user') {
+            converted.push({ role: 'user', content: message.content })
+            continue
+        }
+
+        if (message.role === 'assistant') {
+            // Thinking signatures and native block ordering must survive the next tool round.
+            const content: AnthropicContentBlock[] = message.providerContent ?? [
+                ...(message.content ? [{ type: 'text' as const, text: message.content }] : []),
+                ...(message.tool_calls?.map(toToolUseBlock) ?? []),
+            ]
+            converted.push({ role: 'assistant', content })
+        }
+    }
+
+    return converted
+}
+
+export class AnthropicProvider extends LLMProvider {
     async chat(messages: readonly Message[], options?: ChatOptions): Promise<ChatResponse> {
         const system = messages.filter(message => message.role === 'system').map(message => ({ type: 'text', text: message.content }))
         const baseUrl = (this.config.baseUrl ?? 'https://api.anthropic.com/v1').replace(/\/+$/, '')
@@ -17,7 +79,8 @@ export class AnthropicProvider extends ChatProvider {
             body: JSON.stringify({
                 model: this.config.model,
                 system: system.length ? system : undefined,
-                messages: messages.filter(message => message.role !== 'system').map(({ role, content }) => ({ role, content })),
+                messages: toAnthropicMessages(messages),
+                tools: options?.tools?.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })),
                 max_tokens: this.config.maxTokens ?? 4096,
                 temperature: this.config.temperature,
                 stream: false,
@@ -33,6 +96,9 @@ export class AnthropicProvider extends ChatProvider {
             .filter(block => block.type === 'text')
             .map(block => block.text)
             .join('')
+        const toolCalls: ToolCall[] = result.content
+            .filter(block => block.type === 'tool_use')
+            .map(block => ({ id: block.id, type: 'function', function: { name: block.name, arguments: JSON.stringify(block.input) } }))
         const cachedTokens = result.usage.cache_read_input_tokens ?? 0
         const cacheCreationTokens = result.usage.cache_creation_input_tokens ?? 0
         const promptTokens = result.usage.input_tokens + cachedTokens + cacheCreationTokens
@@ -51,7 +117,12 @@ export class AnthropicProvider extends ChatProvider {
                 {
                     finish_reason: result.stop_reason === null ? null : (finishReasons[result.stop_reason] ?? result.stop_reason),
                     index: 0,
-                    message: { role: 'assistant', content },
+                    message: {
+                        role: 'assistant',
+                        content,
+                        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+                        providerContent: result.content,
+                    },
                 },
             ],
             created: Math.floor(Date.now() / 1000),
@@ -91,7 +162,7 @@ export class AnthropicProvider extends ChatProvider {
             body: JSON.stringify({
                 model: this.config.model,
                 system: system.length ? system : undefined,
-                messages: messages.filter(message => message.role !== 'system').map(({ role, content }) => ({ role, content })),
+                messages: toAnthropicMessages(messages),
                 max_tokens: this.config.maxTokens ?? 4096,
                 temperature: this.config.temperature,
                 stream: true,

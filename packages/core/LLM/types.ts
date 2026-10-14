@@ -1,13 +1,26 @@
 import type { z } from 'zod'
-import type { chatOptionsSchema, messageSchema, providerConfigSchema, providerSchema } from './schemas.ts'
+import type {
+    anthropicContentBlockSchema,
+    chatOptionsSchema,
+    messageSchema,
+    providerConfigSchema,
+    providerSchema,
+    toolCallSchema,
+    toolDefinitionSchema,
+} from './schemas.ts'
 
 export type Message = z.infer<typeof messageSchema>
 export type Provider = z.infer<typeof providerSchema>
 /** Server-side configuration shared by both providers. */
 export type ProviderConfig = Readonly<z.infer<typeof providerConfigSchema>>
 export type ChatOptions = Readonly<z.infer<typeof chatOptionsSchema>>
+/** Model-facing function definition, owned by the LLM protocol module. */
+export type ToolDefinition = Readonly<z.infer<typeof toolDefinitionSchema>>
+/** Function-call protocol shared by model providers. */
+export type ToolCall = z.infer<typeof toolCallSchema>
+export type AssistantMessage = Extract<Message, { role: 'assistant' }>
 
-export { ChatProvider } from './providers/baseProvider.ts'
+export { LLMProvider } from './providers/baseProvider.ts'
 
 export interface ChatResponse {
     base_resp: {
@@ -17,10 +30,7 @@ export interface ChatResponse {
     choices: {
         finish_reason: string | null
         index: number
-        message: {
-            content: string
-            role: 'assistant'
-        }
+        message: AssistantMessage
     }[]
     created: number
     id: string
@@ -65,11 +75,7 @@ interface Choices {
 }
 
 /** Native Anthropic response blocks before conversion to the shared chat format. */
-export type AnthropicContentBlock =
-    | { type: 'text'; text: string; citations?: unknown[] | null }
-    | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-    | { type: 'thinking'; thinking: string; signature: string }
-    | { type: 'redacted_thinking'; data: string }
+export type AnthropicContentBlock = z.infer<typeof anthropicContentBlockSchema>
 
 export type AnthropicStopReason =
     'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'pause_turn' | 'refusal' | 'model_context_window_exceeded'

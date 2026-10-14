@@ -1,6 +1,6 @@
 import type { ChatOptions, ChatResponse, Message, ProviderConfig, StreamResponse } from '../types.ts'
 
-export abstract class ChatProvider {
+export abstract class LLMProvider {
     protected readonly config: ProviderConfig
 
     constructor(config: ProviderConfig) {

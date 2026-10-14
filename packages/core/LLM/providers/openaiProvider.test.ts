@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi, describe } from 'vitest'
+import { test, describe } from 'vitest'
 import { OpenAIProvider } from './openaiProvider.ts'
 
 describe('OpenAIProvider request testing', () => {
@@ -8,7 +8,7 @@ describe('OpenAIProvider request testing', () => {
 
     if (!apiKey || !model || !baseUrl) {
         throw new Error(`
-      Testing OpenAIProvider requires an \`apiKey\` and \`model\ and \`baseUrl\`
+      Testing OpenAIProvider requires an \`apiKey\` and \`model\` and \`baseUrl\`
       apiKey: ${apiKey}
       model: ${model}
       baseUrl: ${baseUrl}
