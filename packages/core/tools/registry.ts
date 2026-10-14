@@ -1,6 +1,6 @@
-import type { Tool } from './types.ts'
+import type { Tool, ToolSchema } from './types.ts'
 import { DuplicateToolError, InvalidToolDefinitionError } from './errors.ts'
-import { isFrozenJson } from './json.ts'
+import { cloneJson, isFrozenJson } from './json.ts'
 import { toolSchema } from './schemas.ts'
 
 /** Checks immutable host definitions without evaluating getters. @param value - Candidate tool. @returns Nothing, narrowing valid tools. @throws InvalidToolDefinitionError for mutable or malformed metadata. */
@@ -22,6 +22,17 @@ function assertTool(value: unknown): asserts value is Tool {
 /** Instance-owned registry of host-provided tools. */
 export class ToolRegistry {
     readonly #tools = new Map<string, Tool>()
+
+    /** Exports model descriptions in registration order without executing tools. @returns New descriptor objects and deeply copied JSON schemas, detached from registry state. @throws If native JSON cloning fails. */
+    schemas(): readonly ToolSchema[] {
+        return this.list().map(
+            /** Projects allowlisted model fields. @param tool - Frozen registered tool. @returns A detached model description. */ tool => ({
+                name: tool.name,
+                description: tool.description,
+                parameters: cloneJson(tool.parameters),
+            })
+        )
+    }
 
     /** Registers tools atomically in submission order. @param tools - One tool or a batch. @returns Nothing. @throws InvalidToolDefinitionError or DuplicateToolError; failure leaves the collection unchanged. */
     registry(tools: Tool | readonly Tool[]): void {
