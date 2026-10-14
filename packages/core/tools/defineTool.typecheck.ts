@@ -8,7 +8,12 @@ const text = defineTool({
     description: 'Text',
     parameters: z.strictObject({ text: z.string() }),
     output: z.string(),
-    /** Preserves parameter inference. @param args - Parsed text. @returns String output. */ execute(args) {
+    /**
+     * Checks inferred argument types and returns the parsed text.
+     * @param args - Parsed text arguments whose inferred type is asserted.
+     * @returns The parsed text string.
+     */
+    execute(args) {
         expectTypeOf(args).toEqualTypeOf<{ text: string }>()
         return args.text
     },
@@ -18,7 +23,11 @@ const object = defineTool({
     description: 'Object',
     parameters: z.strictObject({}),
     output: z.strictObject({ value: z.number() }),
-    /** Produces typed object output. @returns A value object. */ execute() {
+    /**
+     * Produces an object used to verify output type inference.
+     * @returns An object containing a numeric value.
+     */
+    execute() {
         return { value: 1 }
     },
 })
@@ -34,8 +43,14 @@ defineTool({
     description: 'Bad',
     parameters: z.strictObject({}),
     output: z.string(),
-    // @ts-expect-error The body must match the declared output.
-    execute: () => 1,
+    execute:
+        /**
+         * Supplies an intentionally invalid numeric output for a compile-time error assertion.
+         * @returns A number that conflicts with the declared string output schema.
+         */
+        () =>
+            // @ts-expect-error The body must match the declared output.
+            1,
 })
 defineTool({
     name: 'bad_root',
@@ -43,5 +58,11 @@ defineTool({
     // @ts-expect-error Tool parameter schemas must produce object arguments.
     parameters: z.string(),
     output: z.string(),
-    execute: () => 'x',
+    /**
+     * Supplies string output for a fixture whose parameter schema has an invalid root type.
+     * @returns A string matching the fixture's output schema.
+     */
+    execute() {
+        return 'x'
+    },
 })

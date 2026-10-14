@@ -10,7 +10,7 @@
 
 **Spec:** [Tools 定义与 ToolRegistry 软件设计文档](../specs/2026-10-14-tools-registry-design.md)
 
-状态：五项任务实现与本地验收完成，待整体审阅。执行采用当前会话顺序实现，测试按任务逐项验证失败与通过。
+状态：五项任务已完成；整体审阅发现已修复并通过回归验收。执行采用当前会话顺序实现，测试按任务逐项验证失败与通过。
 
 ## Review Focus
 
@@ -330,3 +330,13 @@ pnpm exec node --experimental-strip-types --input-type=module -e 'await import("
 Expected: 类型、选定的全部本地测试、格式、lint 退出码 0；公共入口打印 `Public entries loaded`。这些命令涵盖 tools 与现有 34 个 mock provider 用例。
 
 扫描生产代码的跨模块导入：LLM 中的 `../tools`、tools 中的 `../LLM` 及 provider 引用均应无匹配；core 根目录的集成测试允许同时消费两个入口。`openaiProvider.test.ts` 是真实服务测试，不属于本次本地验收命令，不注入真实凭据或运行它。
+
+### 整体审阅与回归验收
+
+独立审阅发现的两处行为问题已通过先失败、后通过的测试修复：
+
+- `rejects metadata that masks a non-strict parameter policy`：普通 object、loose object 和允许额外字段的 catchall 即使声明 `additionalProperties: false` 元数据，也必须在定义阶段拒绝。
+- `rejects custom array prototypes without calling inherited accessors`：数组子类及自定义原型数组均产生 JSON 错误，不调用继承 getter。
+- `rejects custom array serialization at the %s boundary`：参数与输出两端分别拒绝能改变序列化含义的数组。
+
+最终本地验收为 9 个测试文件、100 个用例全部通过；core 类型检查、格式、lint 和两个入口独立加载通过。新增的多行函数注释要求已同步落实，并检查了 14 个 TypeScript 文件中的 113 个函数体的注释结构和参数、返回值标签。

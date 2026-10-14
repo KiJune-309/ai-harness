@@ -6,10 +6,10 @@
 
 ## 定义与执行
 
-- `defineTool({ name, description, parameters, output, execute })` 使用已有 Zod 定义。参数须为严格 object 根；执行函数的参数与返回值由 schema 推导。
+- `defineTool({ name, description, parameters, output, execute })` 使用已有 Zod 定义。参数须为严格 object 根，原始未知字段策略与生成描述都须拒绝额外字段；执行函数的参数与返回值由 schema 推导。
 - 名称采用 1 至 64 个 ASCII 字母、数字、下划线或连字符，区分大小写；描述包含非空白内容。
 - 定义阶段生成 JSON Schema 并冻结描述快照，过滤 Zod 的非枚举运行时适配信息；不改变作者的 schema 或冻结其执行依赖。
-- `tool.execute(args, context)` 异步校验参数，调用实现，再校验输出。校验后的值须能无损表示为 JSON。
+- `tool.execute(args, context)` 异步校验参数，调用实现，再校验输出。校验后的值须能无损表示为 JSON，数组仅接受普通连续数组，拒绝能继承自定义序列化行为的数组原型。
 - `context` 包含可信的 `userId`、`workspaceId` 和可选 `signal`。API 管理授权，工具实现按工作空间过滤数据，凭据仅保留在服务端闭包或依赖中。
 - 输入与输出失败为带阶段、issues 和 cause 的 `ToolValidationError`；工具实现自身异常原样传播。定义错误为 `InvalidToolDefinitionError`，重名为 `DuplicateToolError`。
 - 包装器在校验前及执行前检查取消；运行中的工具须观察或转发 signal，并完成自身清理后结束，包装器不提前放弃其 Promise。

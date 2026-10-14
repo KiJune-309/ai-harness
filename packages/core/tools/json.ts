@@ -1,9 +1,16 @@
 import type { ToolValidationIssue } from './types.ts'
 
-/** Checks JSON values. @param value - Candidate data. @returns Path-qualified violations. */
+/**
+ * Inspects a value for lossless JSON representation without invoking its accessor properties.
+ * @param value - Candidate data.
+ * @returns Path-qualified violations.
+ * @throws The original error if inspecting object keys, descriptors, or prototypes fails.
+ */
 export function getJsonIssues(value: unknown): readonly ToolValidationIssue[] {
     const issues: ToolValidationIssue[] = []
+    // Track only the current traversal ancestry so repeated non-circular references remain valid.
     const ancestors = new Set<object>()
+    // Leave markers remove an object from the ancestry after its descendants have been inspected.
     const pending: ({ value: unknown; path: PropertyKey[] } | { leave: object })[] = [{ value, path: [] }]
     while (pending.length) {
         const entry = pending.pop()!
@@ -23,12 +30,14 @@ export function getJsonIssues(value: unknown): readonly ToolValidationIssue[] {
             continue
         }
         const array = Array.isArray(current)
-        if (!array && Object.getPrototypeOf(current) !== Object.prototype && Object.getPrototypeOf(current) !== null) {
-            issues.push({ code: 'invalid_json', path, message: 'Expected a plain JSON object' })
+        const prototype: unknown = Object.getPrototypeOf(current)
+        if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+            issues.push({ code: 'invalid_json', path, message: 'Expected a plain JSON object or array' })
             continue
         }
         ancestors.add(current)
         pending.push({ leave: current })
+        // Count representable array entries to detect holes after all own properties are checked.
         let indexes = 0
         for (const key of Reflect.ownKeys(current)) {
             if (array && key === 'length') continue
@@ -51,11 +60,21 @@ export function getJsonIssues(value: unknown): readonly ToolValidationIssue[] {
     }
     return issues
 }
-/** Copies JSON. @param value - Validated JSON. @returns A deep copy. */
+/**
+ * Creates a detached deep copy of validated JSON data.
+ * @param value - Validated JSON value to copy.
+ * @returns A deep copy with no shared object or array references.
+ * @throws DataCloneError if the value contains data unsupported by native structured cloning.
+ */
 export function cloneJson<T>(value: T): T {
     return structuredClone(value)
 }
-/** Freezes JSON containers. @param value - Validated JSON. @returns The same immutable reference. */
+/**
+ * Freezes every object and array in validated JSON data in place.
+ * @param value - Validated JSON value whose containers will be frozen.
+ * @returns The same value reference, with all reachable containers frozen.
+ * @throws The original error if reading or freezing a container fails.
+ */
 export function freezeJson<T>(value: T): Readonly<T> {
     const pending: unknown[] = [value]
     const visited = new Set<object>()
@@ -68,7 +87,12 @@ export function freezeJson<T>(value: T): Readonly<T> {
     }
     return value
 }
-/** Checks container immutability. @param value - Validated JSON. @returns Whether all containers are frozen. */
+/**
+ * Checks that every object and array in validated JSON data is frozen.
+ * @param value - Validated JSON value to inspect.
+ * @returns Whether all reachable containers are frozen.
+ * @throws The original error if inspecting or reading a container fails.
+ */
 export function isFrozenJson(value: unknown): boolean {
     const pending: unknown[] = [value]
     const visited = new Set<object>()
