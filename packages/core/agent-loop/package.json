@@ -1,0 +1,73 @@
+{
+    "name": "@deepseek-ai/dsh-agent-loop",
+    "description": "The concrete agent loop plugin for the DeepSeek Harness",
+    "version": "0.2.1-alpha.5",
+    "publishConfig": {
+        "access": "public"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
+        "directory": "packages/core/agent-loop"
+    },
+    "type": "module",
+    "main": "lib/types/index.js",
+    "types": "lib/types/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./lib/types/index.d.ts",
+            "default": "./lib/types/index.js"
+        },
+        "./package.json": "./package.json",
+        "./locale/*.json": "./locale/*.json"
+    },
+    "files": [
+        "locale/*.json",
+        "lib/types/**/*.d.ts",
+        "lib/types/**/*.js"
+    ],
+    "license": "MIT",
+    "peerDependencies": {
+        "@deepseek-ai/cordis": "4.0.5-alpha.2",
+        "@deepseek-ai/dsh-agent": "workspace:*",
+        "@deepseek-ai/dsh-llm": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-scope": "workspace:*",
+        "@deepseek-ai/dsh-session": "workspace:*",
+        "@deepseek-ai/dsh-session-persistence": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-session-projection": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-system-prompt": "workspace:*",
+        "@deepseek-ai/dsh-tools": "workspace:*"
+    },
+    "dependencies": {
+        "@deepseek-ai/dsh-brand": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-util-values": "0.2.1-alpha.5",
+        "@deepseek-ai/schemastery": "3.18.5-alpha.2",
+        "zod": "4.4.3"
+    },
+    "devDependencies": {
+        "@deepseek-ai/dsh-llm-deepseek-api-key": "0.2.1-alpha.5",
+        "@deepseek-ai/cordis": "4.0.5-alpha.2",
+        "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-agent": "workspace:*",
+        "@deepseek-ai/dsh-llm": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-scope": "workspace:*",
+        "@deepseek-ai/dsh-session": "workspace:*",
+        "@deepseek-ai/dsh-session-persistence": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-session-projection": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-system-prompt": "workspace:*",
+        "@deepseek-ai/dsh-tools": "workspace:*",
+        "@deepseek-ai/cosmokit": "1.8.6-alpha.2",
+        "@deepseek-ai/dsh-agent-loop-testkit": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-file-reference-local": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-jobs-local": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-ptc-runtime": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-subagent": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-tool-subagent": "0.2.1-alpha.5"
+    },
+    "private": true,
+    "scripts": {
+        "build": "tsc -b"
+    }
+}

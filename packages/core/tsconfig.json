@@ -1,14 +1,32 @@
 {
-    "compilerOptions": {
-        "target": "ES2022",
-        "lib": ["ES2022", "DOM"],
-        "types": ["node"],
-        "module": "NodeNext",
-        "moduleResolution": "NodeNext",
-        "strict": true,
-        "noEmit": true,
-        "allowImportingTsExtensions": true
-    },
-    "include": ["**/*.ts"],
-    "exclude": ["node_modules", "dist"]
+    "files": [],
+    "references": [
+        {
+            "path": "./agent"
+        },
+        {
+            "path": "./agent-default-model"
+        },
+        {
+            "path": "./agent-loop"
+        },
+        {
+            "path": "./agent-tool-presentation"
+        },
+        {
+            "path": "./scope"
+        },
+        {
+            "path": "./session"
+        },
+        {
+            "path": "./system-prompt"
+        },
+        {
+            "path": "./tools"
+        },
+        {
+            "path": "./chat-runtime"
+        }
+    ]
 }

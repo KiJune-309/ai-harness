@@ -1,0 +1,14 @@
+{
+    "extends": "../tsconfig.base.json",
+    "compilerOptions": { "rootDir": "src", "outDir": "lib" },
+    "include": ["src"],
+    "references": [
+        { "path": "../../contracts" },
+        { "path": "../agent" },
+        { "path": "../agent-loop" },
+        { "path": "../session" },
+        { "path": "../system-prompt" },
+        { "path": "../tools" },
+        { "path": "../scope" }
+    ]
+}

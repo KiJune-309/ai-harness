@@ -1,0 +1,25 @@
+{
+    "extends": "../tsconfig.base.json",
+    "compilerOptions": {
+        "rootDir": "src",
+        "outDir": "lib/types"
+    },
+    "include": ["src"],
+    "references": [
+        {
+            "path": "../session"
+        },
+        {
+            "path": "../system-prompt"
+        },
+        {
+            "path": "../tools"
+        },
+        {
+            "path": "../agent"
+        },
+        {
+            "path": "../scope"
+        }
+    ]
+}
