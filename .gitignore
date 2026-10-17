@@ -1,12 +1,17 @@
 node_modules/
 .pnpm-store/
 .idea/
+.local/
 **/.next/
 **/dist/
 **/build/
 **/coverage/
 **/out/
 *.tsbuildinfo
+packages/core/*/lib/
+packages/contracts/lib/
+packages/db/lib/
+apps/api/lib/
 .env
 .env.*
 !.env.example

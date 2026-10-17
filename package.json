@@ -15,6 +15,10 @@
     },
     "type": "module",
     "scripts": {
+        "dev:web": "pnpm --filter @ai-harness/web dev",
+        "build:web": "pnpm build:contracts && pnpm --filter @ai-harness/web build",
+        "start:web": "pnpm --filter @ai-harness/web start",
+        "typecheck:web": "pnpm --filter @ai-harness/web typecheck",
         "commit": "node scripts/commit.mjs",
         "test": "vitest run",
         "test:watch": "vitest",
@@ -22,7 +26,15 @@
         "lint:fix": "eslint . --fix",
         "format": "prettier . --write",
         "format:check": "prettier . --check",
-        "prepare": "husky"
+        "prepare": "husky",
+        "build:core": "tsc -b packages/core/tsconfig.json",
+        "typecheck:core": "tsc -p packages/core/tsconfig.check.json",
+        "dev": "node scripts/dev.mjs",
+        "dev:api": "pnpm --filter @ai-harness/api dev",
+        "build:api": "node scripts/build-server.mjs",
+        "start:api": "pnpm --filter @ai-harness/api start",
+        "typecheck:api": "pnpm --filter @ai-harness/api typecheck",
+        "build:contracts": "pnpm --filter @ai-harness/contracts build"
     },
     "devDependencies": {
         "@commitlint/cli": "^21.2.3",
@@ -38,6 +50,12 @@
         "prettier": "^3.9.9",
         "typescript": "^5.9.3",
         "typescript-eslint": "^8.70.1",
-        "vitest": "^5.0.3"
+        "vitest": "^5.0.3",
+        "fast-check": "^4.9.0"
+    },
+    "deepseekHarness": {
+        "repository": "https://github.com/deepseek-ai/deepseek-harness",
+        "commit": "1517a4dbca0a2789ff1d41ba439600f8547d23fa",
+        "path": "packages/core"
     }
 }

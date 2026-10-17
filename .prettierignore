@@ -1,9 +1,15 @@
 node_modules/
 .pnpm-store/
 .idea/
+.local/
 **/.next/
+**/next-env.d.ts
 **/dist/
 **/build/
 **/coverage/
 **/out/
 pnpm-lock.yaml
+packages/core/*/lib/
+packages/contracts/lib/
+packages/db/lib/
+apps/api/lib/
