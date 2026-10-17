@@ -2,5 +2,26 @@
     "name": "@ai-harness/db",
     "version": "0.0.0",
     "private": true,
-    "type": "module"
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./lib/index.d.ts",
+            "import": "./lib/index.js"
+        }
+    },
+    "files": [
+        "lib"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.check.json",
+        "test": "pnpm -w exec vitest run packages/db/tests"
+    },
+    "dependencies": {
+        "@ai-harness/contracts": "workspace:*",
+        "pg": "^8.16.3"
+    },
+    "devDependencies": {
+        "@types/pg": "^8.15.5"
+    }
 }
