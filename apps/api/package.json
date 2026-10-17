@@ -5,7 +5,22 @@
     "type": "module",
     "dependencies": {
         "@ai-harness/contracts": "workspace:*",
-        "@ai-harness/core": "workspace:*",
-        "@ai-harness/db": "workspace:*"
+        "@ai-harness/chat-runtime": "workspace:*",
+        "@ai-harness/db": "workspace:*",
+        "@nestjs/common": "^12.1.3",
+        "@nestjs/core": "^12.1.3",
+        "@nestjs/platform-express": "^12.1.3",
+        "reflect-metadata": "^0.2.2",
+        "rxjs": "^7.8.2"
+    },
+    "scripts": {
+        "dev": "tsx watch src/main.ts",
+        "build": "tsc -p tsconfig.json",
+        "start": "node lib/main.js",
+        "typecheck": "tsc -p tsconfig.json --noEmit"
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.6",
+        "tsx": "^4.23.15"
     }
 }
