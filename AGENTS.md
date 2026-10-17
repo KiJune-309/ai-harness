@@ -1,9 +1,3 @@
-# 项目协作说明
-
-## 当前状态
-
-这是一个 AI 聊天项目的 monorepo 目录骨架。目标功能是聊天、知识库上传与检索、插件配置与调用。当前仅建立目录和 pnpm workspace 声明；应用入口、依赖、数据库结构和运行脚本尚未实现。不要把空目录当成已完成的功能。
-
 ## 目录职责
 
 | 路径                 | 职责                                                                                                                         |
@@ -32,8 +26,23 @@
 
 ## 开发约定
 
+- Web 界面的视觉变量、组件用法与交互验收参照 `docs/ui-design-spec.md`；保留其中现有实现与待落地要求的区分，修改公共 UI 模式时同步更新规范。
 - 使用 pnpm workspace 管理应用和包。新增可运行应用时，再添加真实依赖、脚本和入口；不要保留会误导使用者的占位运行命令。
+- 测试统一放在各模块与 `src` 同级的 `tests` 目录，不放入生产源码目录；`apps/web` 没有 `src`，测试放在包根目录 `tests`，按 `lib`、`server` 等原模块分组。生产构建只编译源码，不输出测试文件。
 - 根目录使用 Prettier 统一格式，使用 ESLint flat config 检查 JavaScript/TypeScript；Next.js 专用规则仅用于 `apps/web`。提交前运行 `pnpm format:check` 和 `pnpm lint`。
+- 每个函数都须编写标准的函数注释，使用 JSDoc/TSDoc 格式说明函数用途、参数和返回值；如有副作用或可能抛出的异常，也须说明。
+- 函数注释必须使用多行 `/** ... */` 块，紧贴函数声明上方：`/**` 和 `*/` 各占一行，中间每行以 ` *` 开头；用途说明与每个 `@param`、`@returns`、`@throws` 标签分别独占一行。禁止将函数注释压缩成单行，即使注释内容较短也须保持多行格式。示例：
+
+    ```ts
+    /**
+     * Checks immutable host definitions without evaluating getters.
+     * @param value - Candidate tool.
+     * @returns Nothing, narrowing valid tools.
+     * @throws InvalidToolDefinitionError for mutable or malformed metadata.
+     */
+    ```
+
+- 当变量名无法清楚表达变量含义时，须在变量声明处添加注释，说明其含义和用途。
 - Git 提交信息遵循 `docs/commit-convention.md`；优先使用与改动模块对应的 scope。提交钩子会用 commitlint 校验提交信息。
 - 优先在现有模块内扩展职责，只有出现明确的部署或复用需求时再拆新服务或共享包。
 - 配置通过环境变量提供，提交示例配置，不提交密钥或真实连接串。
