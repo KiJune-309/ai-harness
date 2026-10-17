@@ -1,0 +1,818 @@
+.page {
+    width: 100%;
+    max-width: 1320px;
+    margin-inline: auto;
+    padding: 32px var(--page-inset) 72px;
+}
+
+.pageHeading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    margin-block-end: 28px;
+}
+
+.eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    margin-block-end: 14px;
+}
+
+.pageHeading h1 {
+    margin: 0 0 12px;
+    font-size: 26px;
+    font-weight: 550;
+    letter-spacing: -0.045em;
+    line-height: 1.35;
+}
+
+.pageHeading p,
+.loading p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.7;
+    font-size: 14px;
+}
+
+.count {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    padding-block-end: 3px;
+}
+
+.agentList {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 4px 4px 16px;
+    margin: -4px -4px 24px;
+    border-bottom: 1px solid var(--line);
+}
+
+.agentTab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    min-height: 40px;
+    max-width: 220px;
+    padding: 8px 14px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-xs);
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.agentTab span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agentTab:hover,
+.secondaryButton:hover,
+.iconButton:hover,
+.addMessage:hover {
+    background: var(--wash);
+}
+
+.activeTab {
+    border-color: var(--line);
+    background: var(--surface);
+    color: var(--ink);
+}
+
+.layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.58fr);
+    align-items: start;
+    gap: 40px;
+}
+
+.form {
+    min-width: 0;
+}
+
+.editorHeading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-block-end: 28px;
+}
+
+.editorHeading h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 550;
+    letter-spacing: -0.025em;
+}
+
+.saveState {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: end;
+}
+
+.section {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    min-width: 0;
+    margin: 0 0 30px;
+    padding: 0 0 30px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.section legend {
+    width: 100%;
+    margin-block-end: 22px;
+    padding: 0;
+    font-size: 14px;
+    font-weight: 550;
+}
+
+.section legend > span:first-child {
+    margin-inline-end: 10px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    min-width: 0;
+}
+
+.field label,
+.fieldLabel,
+.openingTop label {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.optional {
+    margin-inline-start: 6px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.field input,
+.field textarea,
+.field select,
+.opening textarea {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-xs);
+    background: var(--surface);
+    color: var(--ink);
+    padding: 11px 13px;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.field input::placeholder,
+.field textarea::placeholder,
+.opening textarea::placeholder {
+    color: var(--muted);
+    opacity: 0.85;
+}
+
+.field input:focus-visible,
+.field textarea:focus-visible,
+.field select:focus-visible,
+.opening textarea:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 3px;
+}
+
+.field input[aria-invalid='true'],
+.field textarea[aria-invalid='true'],
+.field select[aria-invalid='true'],
+.opening textarea[aria-invalid='true'] {
+    border-color: var(--ink);
+    box-shadow: inset 3px 0 0 var(--ink);
+}
+
+.field textarea,
+.opening textarea {
+    resize: vertical;
+}
+
+.field .prompt {
+    min-height: 224px;
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+.selectWrap {
+    position: relative;
+}
+
+.selectWrap select {
+    appearance: none;
+    padding-inline-end: 38px;
+    cursor: pointer;
+}
+
+.selectWrap > svg {
+    position: absolute;
+    inset-inline-end: 13px;
+    inset-block-start: 16px;
+    pointer-events: none;
+    color: var(--muted);
+}
+
+.hint,
+.sectionIntro {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+    margin: 0;
+}
+
+.sectionIntro {
+    margin-block-start: -10px;
+}
+
+.labelRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.characterCount {
+    color: var(--muted);
+    font-size: 10px;
+    flex-shrink: 0;
+}
+
+.toolGrid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-block-start: 3px;
+}
+
+.toolCard {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 16px 13px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    cursor: pointer;
+    transition:
+        border-color 160ms ease,
+        background 160ms ease;
+}
+
+.toolCard:hover {
+    border-color: var(--line-strong);
+}
+
+.toolSelected {
+    border-color: var(--ink);
+    background: var(--wash);
+}
+
+.toolIcon {
+    padding-block-start: 2px;
+}
+
+.toolContent {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-inline-end: 16px;
+}
+
+.toolContent strong {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.toolContent > span {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.7;
+    font-weight: 400;
+}
+
+.toolCard input[type='checkbox'] {
+    position: absolute;
+    inset-inline-end: 12px;
+    inset-block-start: 17px;
+    width: 15px;
+    height: 15px;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    accent-color: var(--ink);
+    cursor: pointer;
+}
+
+.openings {
+    display: grid;
+    gap: 14px;
+}
+
+.openings:empty {
+    display: none;
+}
+
+.opening {
+    min-width: 0;
+}
+
+.openingTop {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-block-end: 7px;
+}
+
+.openingTop > div {
+    display: flex;
+    gap: 3px;
+}
+
+.iconButton {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: var(--radius-2xs);
+    color: var(--muted);
+}
+
+.addMessage {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    margin-block-start: -8px;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-xs);
+    padding: 10px 13px;
+    font-size: 13px;
+}
+
+.addMessage > span {
+    margin-inline-start: auto;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.formFooter {
+    display: grid;
+    gap: 14px;
+    margin-block-start: -8px;
+}
+
+.footerActions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.primaryButton,
+.secondaryButton,
+.useAgent {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 10px 14px;
+    border-radius: var(--radius-xs);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.primaryButton {
+    border: 1px solid var(--ink);
+    color: var(--surface);
+    background: var(--ink);
+}
+
+.primaryButton:hover {
+    background: var(--muted);
+    border-color: var(--muted);
+}
+
+.secondaryButton {
+    border: 1px solid var(--line);
+    background: var(--surface);
+}
+
+.page button:disabled,
+.page fieldset:disabled,
+.page input:disabled,
+.page select:disabled,
+.page textarea:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.page fieldset:disabled button:disabled {
+    opacity: 1;
+}
+
+.notice,
+.saveError,
+.fieldError {
+    margin: 0;
+    color: var(--ink);
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.fieldError {
+    font-weight: 500;
+}
+
+.notice {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.saveError,
+.discardNotice {
+    padding: 12px 14px;
+    border-inline-start: 3px solid var(--ink);
+    background: var(--wash);
+    border-radius: var(--radius-2xs);
+}
+
+.discardNotice {
+    margin-block-end: 24px;
+}
+
+.discardNotice p {
+    margin: 0 0 12px;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.discardNotice > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.preview {
+    position: sticky;
+    top: 24px;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+}
+
+.previewHeading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 17px 20px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.previewLabel {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--muted);
+}
+
+.previewBody {
+    padding: 28px 20px 22px;
+    text-align: center;
+}
+
+.avatar {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 58px;
+    height: 58px;
+    margin: 0 auto 15px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--wash);
+}
+
+.previewBody h2 {
+    margin: 0 0 8px;
+    font-size: 20px;
+    font-weight: 550;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.previewDescription {
+    margin: 0 auto 15px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.modelBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-2xs);
+    font-size: 10px;
+    color: var(--muted);
+}
+
+.modelBadge > span {
+    width: 4px;
+    height: 4px;
+    background: var(--ink);
+    border-radius: 50%;
+}
+
+.previewTools {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 7px 10px;
+    margin-block-start: 14px;
+}
+
+.previewTools > span {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 10px;
+}
+
+.previewDivider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-block: 30px 22px;
+    color: var(--muted);
+    font-size: 10px;
+}
+
+.previewDivider::before,
+.previewDivider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+}
+
+.previewMessages {
+    display: grid;
+    gap: 14px;
+    max-height: 330px;
+    overflow-y: auto;
+    text-align: start;
+}
+
+.previewMessage {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.previewMessage > svg {
+    flex-shrink: 0;
+    margin-block-start: 12px;
+    color: var(--muted);
+}
+
+.previewMessage p {
+    min-width: 0;
+    margin: 0;
+    padding: 11px 12px;
+    border-radius: var(--radius-xs);
+    background: var(--wash);
+    font-size: 12px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.previewEmpty {
+    display: grid;
+    justify-items: center;
+    gap: 9px;
+    padding-block: 20px 30px;
+    color: var(--muted);
+}
+
+.previewEmpty p {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.9;
+}
+
+.promptPreview {
+    margin-block-start: 24px;
+    border-top: 1px solid var(--line);
+    text-align: start;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.promptPreview summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+    padding-block-start: 8px;
+    list-style: none;
+    cursor: pointer;
+}
+
+.promptPreview summary::-webkit-details-marker {
+    display: none;
+}
+
+.promptPreview[open] summary > svg {
+    transform: rotate(180deg);
+}
+
+.promptPreview p {
+    max-height: 240px;
+    overflow-y: auto;
+    margin: 8px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    line-height: 1.8;
+}
+
+.previewFootnote {
+    border-top: 1px solid var(--line);
+    padding: 14px 16px;
+    background: var(--wash);
+    color: var(--muted);
+    font-size: 10px;
+    text-align: center;
+    line-height: 1.7;
+}
+
+.useAgent {
+    display: flex;
+    min-height: 46px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+}
+
+.useAgent:hover {
+    background: var(--wash);
+}
+
+.loading {
+    display: flex;
+    min-height: 60vh;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 32px;
+    text-align: center;
+}
+
+.loading h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 500;
+}
+
+.spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (min-width: 1500px) {
+    .layout {
+        gap: 64px;
+    }
+}
+
+@media (max-width: 1100px) {
+    .page {
+        padding-inline: 28px;
+    }
+
+    .layout {
+        gap: 24px;
+        grid-template-columns: minmax(0, 1fr) 280px;
+    }
+
+    .toolGrid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 900px) {
+    .layout {
+        grid-template-columns: 1fr;
+    }
+
+    .preview {
+        position: static;
+        max-width: 480px;
+        width: 100%;
+        margin-inline: auto;
+    }
+
+    .toolGrid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 560px) {
+    .page {
+        padding: 24px 20px 40px;
+    }
+
+    .pageHeading {
+        align-items: flex-start;
+        gap: 12px;
+    }
+
+    .pageHeading h1 {
+        font-size: 23px;
+    }
+
+    .pageHeading p {
+        font-size: 13px;
+    }
+
+    .count {
+        display: none;
+    }
+
+    .toolGrid {
+        grid-template-columns: 1fr;
+    }
+
+    .iconButton {
+        width: 44px;
+        height: 44px;
+    }
+
+    .footerActions {
+        flex-direction: column-reverse;
+        align-items: stretch;
+    }
+
+    .primaryButton,
+    .secondaryButton {
+        min-height: 44px;
+    }
+
+    .labelRow {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .page *,
+    .loading * {
+        animation: none;
+        transition: none;
+    }
+}
