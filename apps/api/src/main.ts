@@ -17,7 +17,7 @@ async function main(): Promise<void> {
     }
     console.log(`Chat API listening on http://${config.host}:${config.port}`)
     if (!config.apiKey) console.log('DeepSeek is not configured. Set DEEPSEEK_API_KEY and restart the server.')
-    if (!config.databaseUrl) console.log('Chat history uses temporary memory storage for this development session.')
+    console.log('Business data is stored in PostgreSQL.')
 }
 
 void main().catch(() => {
