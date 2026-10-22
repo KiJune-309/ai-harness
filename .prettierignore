@@ -13,3 +13,9 @@ packages/core/*/lib/
 packages/contracts/lib/
 packages/db/lib/
 apps/api/lib/
+
+# 界面设计过程产物（本地证据与素材缓存，不入库）
+oil-ui-work/
+explore/
+style-explorer.html
+.curate-cache.json
