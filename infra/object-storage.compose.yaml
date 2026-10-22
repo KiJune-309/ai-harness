@@ -1,0 +1,22 @@
+name: ai-harness-objects
+services:
+    minio:
+        image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+        command: server /data --console-address ':9001'
+        restart: unless-stopped
+        environment:
+            MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?Missing private object configuration}
+            MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?Missing private object configuration}
+        ports:
+            - '127.0.0.1:9002:9000'
+            - '127.0.0.1:9003:9001'
+        volumes:
+            - knowledge-objects:/data
+        healthcheck:
+            test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+            interval: 2s
+            timeout: 3s
+            retries: 25
+volumes:
+    knowledge-objects:
+        name: ai-harness_knowledge_objects
