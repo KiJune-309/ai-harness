@@ -14,6 +14,7 @@ import {
     type ChatMessage,
     type ChatStatus,
     type ChatStreamEvent,
+    type HumanDecisionAction,
     type CreateProject,
     type CreateTemplate,
     type CreateTask,
@@ -30,9 +31,10 @@ import {
     type UpdateTaskProject,
     type UpdateTaskStatus,
 } from '@ai-harness/contracts'
-import { ChatRuntimeError, type ChatRuntime } from '@ai-harness/chat-runtime'
+import { ChatRuntimeError, type ChatRuntime, type ModelConnection } from '@ai-harness/chat-runtime'
 import {
     TemplateConflictError,
+    ConversationCreationConflictError,
     type ChatScope,
     type ChatStore,
     type ProjectStore,
@@ -50,6 +52,11 @@ import {
 } from '@nestjs/common'
 import type { ApiConfig } from './config.js'
 import type { AgentService } from './agent-service.js'
+import { collaborationFailure, type CollaborationService } from './collaboration-service.js'
+import type { CollaborationSourceReservation } from '@ai-harness/db'
+import type { AccountService } from './account-service.js'
+import type { ProjectFolderService } from './project-folder-service.js'
+import { throwLegacyProjectRetired } from './legacy-project-policy.js'
 
 interface ActiveTurn {
     requestId: string
@@ -83,6 +90,7 @@ export class ChatService {
     private readonly turns = new Map<string, ActiveTurn>()
     private readonly mutations = new Map<string, Promise<void>>()
     private closing: Promise<void> | undefined
+    private readonly sourceMutations = new Map<string, CollaborationSourceReservation>()
 
     /**
      * Retain initialized server resources for all chat requests.
@@ -90,12 +98,22 @@ export class ChatService {
      * @param runtime - Initialized Cordis runtime, absent until a key is configured.
      * @param config - Immutable server settings.
      * @param agents - Authorized saved Agent definitions for new conversations.
+     * @param accounts - Private per-account model routes resolved before execution.
+     * @param collaboration - Durable source coordinator for explicitly authorized colleague work.
+     * @param beforeClose - Drains background writers before the shared pool is released.
+     * @param folders - Private folder authorization and project reference tools.
+     * @param durableChat - Whether ordinary turns use the initialized persistent worker.
      */
     constructor(
         private readonly store: ChatStore,
         private readonly runtime: ChatRuntime | undefined,
         private readonly config: ApiConfig,
-        private readonly agents?: AgentService
+        private readonly agents?: AgentService,
+        private readonly accounts?: AccountService,
+        private readonly collaboration?: CollaborationService,
+        private readonly beforeClose?: () => Promise<void>,
+        private readonly folders?: ProjectFolderService,
+        private readonly durableChat = false
     ) {}
 
     /**
@@ -103,7 +121,22 @@ export class ChatService {
      * @returns Model and persistence availability for the chat UI.
      */
     status(): ChatStatus {
-        return { configured: Boolean(this.runtime), model: this.config.model, storage: this.config.databaseUrl ? 'postgres' : 'memory' }
+        return { configured: Boolean(this.runtime), model: this.config.model, storage: 'postgres' }
+    }
+
+    /**
+     * Read the current account's default connection without returning its credentials.
+     * @param scope - Identity established by the account session.
+     * @returns Public model and persistence availability.
+     */
+    async statusFor(scope: ChatScope): Promise<ChatStatus> {
+        if (!this.accounts) return this.status()
+        const personal = await this.accounts.defaultModel(scope)
+        return {
+            ...this.status(),
+            configured: Boolean(this.runtime && (personal || this.config.apiKey)),
+            model: personal?.model ?? this.config.model,
+        }
     }
 
     /**
@@ -113,7 +146,14 @@ export class ChatService {
      */
     async list(scope: ChatScope): Promise<ChatConversation[]> {
         const conversations = await this.store.list(scope)
-        return conversations.filter(conversation => !conversation.task).map(conversation => this.withActivity(scope, conversation))
+        const visible = await Promise.all(
+            conversations.map(async conversation =>
+                !conversation.task || (await this.collaboration?.isBound(scope, { kind: 'task', id: conversation.id }))
+                    ? this.withActivity(scope, conversation)
+                    : undefined
+            )
+        )
+        return visible.filter((conversation): conversation is ChatConversation => Boolean(conversation))
     }
 
     /**
@@ -125,8 +165,28 @@ export class ChatService {
      */
     async get(scope: ChatScope, id: string): Promise<ChatConversation> {
         const conversation = await this.store.get(scope, id)
-        if (!conversation || conversation.task) throw new NotFoundException('未找到这段对话。')
+        if (!conversation || (conversation.task && !(await this.collaboration?.isBound(scope, { kind: 'task', id }))))
+            throw new NotFoundException('未找到这段对话。')
         return this.withActivity(scope, conversation)
+    }
+
+    /**
+     * Permanently removes one ordinary private chat and stops its process-owned generation.
+     * @param scope - Account and workspace verified by the request guard.
+     * @param id - Exact ordinary conversation selected by its owner.
+     * @returns A receipt only after durable deletion and writer invalidation commit.
+     * @throws HttpException when the chat is foreign, is a Task, or persistence fails.
+     */
+    async remove(scope: ChatScope, id: string): Promise<{ id: string; deleted: true }> {
+        if (!this.store.remove) throw new ServiceUnavailableException('对话删除暂时不可用，请稍后重试。')
+        try {
+            if (!(await this.store.remove(scope, id))) throw new NotFoundException('未找到这段对话。')
+            this.turns.get(turnKey(scope, id))?.controller.abort()
+            return { id, deleted: true }
+        } catch (error) {
+            if (error instanceof HttpException) throw error
+            throw new ServiceUnavailableException('对话未能删除，请稍后重试。')
+        }
     }
 
     /**
@@ -134,32 +194,63 @@ export class ChatService {
      * @param scope - Trusted identity.
      * @param title - Optional validated display title.
      * @param agentId - Optional saved Agent resolved within the caller's scope.
+     * @param options - Optional private project and stable creation action.
      * @returns The persisted empty conversation.
      * @throws TooManyRequestsException when the temporary per-user limit is reached.
      */
-    async create(scope: ChatScope, title = '新对话', agentId?: string): Promise<ChatConversation> {
-        if ((await this.store.list(scope)).filter(conversation => !conversation.task).length >= 200)
-            throw new HttpException('当前对话数量已达到上限。', HttpStatus.TOO_MANY_REQUESTS)
-        const now = new Date().toISOString()
-        if (agentId && !this.agents) throw new ServiceUnavailableException('Agent 服务尚未连接。')
-        const agent = agentId ? await this.agents!.get(scope, agentId) : undefined
-        const conversation: ChatConversation = {
-            id: randomUUID(),
+    async create(
+        scope: ChatScope,
+        title = '新对话',
+        agentId?: string,
+        options: { projectFolderId?: string; requestId?: string } = {}
+    ): Promise<ChatConversation> {
+        const original = {
             title,
-            createdAt: now,
-            updatedAt: now,
-            ...(agent ? { agentId: agent.id, agent } : {}),
-            messages: (agent?.openingMessages ?? []).map(content => ({
-                id: randomUUID(),
-                role: 'assistant',
-                content,
-                status: 'complete',
-                createdAt: now,
-                kind: 'opening',
-            })),
+            ...(agentId ? { agentId } : {}),
+            ...(options.projectFolderId ? { projectFolderId: options.projectFolderId } : {}),
         }
-        await this.store.save(scope, conversation)
-        return conversation
+        try {
+            if (options.projectFolderId) {
+                if (!this.folders || !this.store.create) throw new ServiceUnavailableException('项目服务暂时不可用。')
+                await this.folders.get(scope, options.projectFolderId)
+            }
+            if (options.requestId && this.store.create) {
+                const previous = await this.store.get(scope, options.requestId)
+                if (previous) return await this.store.create(scope, previous, original)
+            }
+            if ((await this.store.list(scope)).filter(conversation => !conversation.task).length >= 200)
+                throw new HttpException('当前对话数量已达到上限。', HttpStatus.TOO_MANY_REQUESTS)
+            const now = new Date().toISOString()
+            if (agentId && !this.agents) throw new ServiceUnavailableException('Agent 服务尚未连接。')
+            const agent = agentId
+                ? await this.agents!.get(scope, agentId)
+                : this.accounts
+                  ? await this.taskAgent(scope, undefined, now)
+                  : undefined
+            const conversation: ChatConversation = {
+                id: options.requestId ?? randomUUID(),
+                title,
+                createdAt: now,
+                updatedAt: now,
+                ...(options.projectFolderId ? { projectFolderId: options.projectFolderId } : {}),
+                ...(agent ? { ...(agentId ? { agentId: agent.id } : {}), agent } : {}),
+                messages: (agent?.openingMessages ?? []).map(content => ({
+                    id: randomUUID(),
+                    role: 'assistant',
+                    content,
+                    status: 'complete',
+                    createdAt: now,
+                    kind: 'opening',
+                })),
+            }
+            if (this.store.create) return await this.store.create(scope, conversation, original)
+            await this.saveSnapshot(scope, conversation)
+            return conversation
+        } catch (error) {
+            if (error instanceof ConversationCreationConflictError) throw new ConflictException('此创建操作已用于不同的对话或项目。')
+            if (error instanceof HttpException) throw error
+            throw new ServiceUnavailableException('对话暂时无法创建，请保留输入后重试。')
+        }
     }
 
     /**
@@ -169,9 +260,11 @@ export class ChatService {
      */
     async listTasks(scope: ChatScope): Promise<PersonalTask[]> {
         const conversations = await this.store.list(scope)
-        return conversations
-            .filter(conversation => conversation.task)
-            .map(conversation => personalTaskSchema.parse(this.withActivity(scope, conversation)))
+        return Promise.all(
+            conversations
+                .filter(conversation => conversation.task)
+                .map(async conversation => personalTaskSchema.parse(await this.withActivity(scope, conversation)))
+        )
     }
 
     /**
@@ -192,9 +285,13 @@ export class ChatService {
      * @throws NotFoundException for nonexistent or inaccessible projects.
      */
     private async ownedProject(scope: ChatScope, id: string): Promise<StoredProject> {
-        const stored = await this.projectStore().get(scope, id)
-        if (!stored) throw new NotFoundException('未找到这个项目。')
-        return stored
+        try {
+            const stored = await this.projectStore().get(scope, id)
+            if (!stored) throw new NotFoundException('未找到这个项目。')
+            return stored
+        } catch (error) {
+            return collaborationFailure(error)
+        }
     }
 
     /**
@@ -203,8 +300,12 @@ export class ChatService {
      * @returns Scoped projects ordered by their most recent saved update.
      */
     async listProjects(scope: ChatScope): Promise<PersonalProject[]> {
-        const projects = await this.projectStore().list(scope)
-        return projects.map(stored => stored.project).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        try {
+            const projects = await this.projectStore().list(scope)
+            return projects.map(stored => stored.project).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        } catch (error) {
+            return collaborationFailure(error)
+        }
     }
 
     /**
@@ -216,11 +317,14 @@ export class ChatService {
      * @throws ConflictException for concurrent writes or a reused action with different fields.
      */
     async createProject(scope: ChatScope, input: CreateProject): Promise<PersonalProject> {
+        throwLegacyProjectRetired()
         const parsed = createProjectSchema.safeParse(input)
         if (!parsed.success) throw new BadRequestException('请填写有效的项目名称、说明和请求标识。')
         const { requestId, name, description } = parsed.data
         return this.mutate(scope, `project:${requestId}`, async () => {
             const store = this.projectStore()
+            if (this.store.collaboration && (await this.store.collaboration.project(scope, requestId)))
+                throw new ConflictException('这个标识已属于协作项目，请从项目页面管理。')
             const previous = await store.get(scope, requestId)
             if (previous) {
                 if (previous.project.templateOrigin || previous.creation.name !== name || previous.creation.description !== description)
@@ -242,13 +346,20 @@ export class ChatService {
      * @throws NotFoundException for nonexistent or inaccessible projects.
      */
     async getProject(scope: ChatScope, id: string): Promise<ProjectDetail> {
-        const stored = await this.ownedProject(scope, id)
-        const tasks = (await this.listTasks(scope)).filter(task => task.task.projectId === id)
-        if (stored.project.templateOrigin) {
-            const order = new Map(stored.project.templateOrigin.taskIds.map((taskId, index) => [taskId, index]))
-            tasks.sort((left, right) => (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.id) ?? Number.MAX_SAFE_INTEGER))
+        throwLegacyProjectRetired()
+        try {
+            const stored = await this.ownedProject(scope, id)
+            const tasks = (await this.listTasks(scope)).filter(task => task.task.projectId === id)
+            if (stored.project.templateOrigin) {
+                const order = new Map(stored.project.templateOrigin.taskIds.map((taskId, index) => [taskId, index]))
+                tasks.sort(
+                    (left, right) => (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+                )
+            }
+            return { project: stored.project, tasks }
+        } catch (error) {
+            return collaborationFailure(error)
         }
-        return { project: stored.project, tasks }
     }
 
     /**
@@ -269,9 +380,14 @@ export class ChatService {
      * @throws NotFoundException for absent or inaccessible templates.
      */
     private async ownedTemplate(scope: ChatScope, id: string): Promise<StoredProjectTemplate> {
-        const stored = await this.templateStore().get(scope, id)
-        if (!stored) throw new NotFoundException('未找到这个模板。')
-        return stored
+        try {
+            const stored = await this.templateStore().get(scope, id)
+            if (!stored) throw new NotFoundException('未找到这个模板。')
+            return stored
+        } catch (error) {
+            if (error instanceof TemplateConflictError) throw new ConflictException(error.message)
+            return collaborationFailure(error)
+        }
     }
 
     /**
@@ -280,9 +396,13 @@ export class ChatService {
      * @returns Templates ordered by most recent update.
      */
     async listTemplates(scope: ChatScope): Promise<ProjectTemplate[]> {
-        return (await this.templateStore().list(scope))
-            .map(stored => stored.template)
-            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        try {
+            return (await this.templateStore().list(scope))
+                .map(stored => stored.template)
+                .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        } catch (error) {
+            return collaborationFailure(error)
+        }
     }
 
     /**
@@ -384,6 +504,7 @@ export class ChatService {
      * @throws ServiceUnavailableException when atomic persistence is unavailable.
      */
     async launchTemplate(scope: ChatScope, id: string, input: LaunchTemplate): Promise<TemplateLaunchResult> {
+        throwLegacyProjectRetired()
         const parsed = launchTemplateSchema.safeParse(input)
         if (!parsed.success) throw new BadRequestException('请填写有效的项目名称、说明、模板版本和启动标识。')
         const { requestId, version, name, description } = parsed.data
@@ -465,10 +586,13 @@ export class ChatService {
      * @throws ConflictException for concurrent project writes.
      */
     async updateProject(scope: ChatScope, id: string, input: ProjectInput): Promise<PersonalProject> {
+        throwLegacyProjectRetired()
         const parsed = projectInputSchema.safeParse(input)
         if (!parsed.success) throw new BadRequestException('请填写有效的项目名称和说明。')
         return this.mutate(scope, `project:${id}`, async () => {
             const stored = await this.ownedProject(scope, id)
+            if (this.store.collaboration && (await this.store.collaboration.project(scope, id)))
+                throw new ConflictException('协作项目需从项目页面按当前版本编辑。')
             if (stored.project.name === parsed.data.name && stored.project.description === parsed.data.description) return stored.project
             const project = { ...stored.project, ...parsed.data, updatedAt: new Date().toISOString() }
             await this.projectStore().save(scope, { project, creation: stored.creation })
@@ -487,6 +611,7 @@ export class ChatService {
      * @throws ConflictException during generation or another task mutation.
      */
     async updateTaskProject(scope: ChatScope, id: string, input: UpdateTaskProject): Promise<PersonalTask> {
+        throwLegacyProjectRetired()
         const parsed = updateTaskProjectSchema.safeParse(input)
         if (!parsed.success) throw new BadRequestException('项目归属格式不正确。')
         return this.mutate(scope, id, async () => {
@@ -498,7 +623,7 @@ export class ChatService {
             if (projectId) task.projectId = projectId
             else delete task.projectId
             const updated = personalTaskSchema.parse({ ...previous, task, updatedAt: new Date().toISOString() })
-            await this.store.save(scope, updated)
+            await this.saveSnapshot(scope, updated)
             return updated
         })
     }
@@ -513,6 +638,7 @@ export class ChatService {
      * @throws NotFoundException when the selected Agent is absent or inaccessible.
      */
     async createTask(scope: ChatScope, input: CreateTask): Promise<PersonalTask> {
+        if (input.projectId) throwLegacyProjectRetired()
         const parsed = createTaskSchema.safeParse(input)
         if (!parsed.success) throw new BadRequestException('请填写有效的任务名称、目标和请求标识。')
         const configuration = parsed.data
@@ -527,13 +653,13 @@ export class ChatService {
                     previous.task.creationProjectId !== configuration.projectId
                 )
                     throw new ConflictException('同一个创建请求标识不能用于不同的任务。')
-                return personalTaskSchema.parse(this.withActivity(scope, previous))
+                return personalTaskSchema.parse(await this.withActivity(scope, previous))
             }
             if (configuration.projectId) await this.ownedProject(scope, configuration.projectId)
             const now = new Date().toISOString()
             const agent = await this.taskAgent(scope, configuration.agentId, now)
             const task = this.newTaskSnapshot(configuration, agent, now)
-            await this.store.save(scope, task)
+            await this.saveSnapshot(scope, task)
             return task
         })
     }
@@ -581,7 +707,7 @@ export class ChatService {
     async getTask(scope: ChatScope, id: string): Promise<PersonalTask> {
         const conversation = await this.store.get(scope, id)
         if (!conversation?.task) throw new NotFoundException('未找到这个任务。')
-        return personalTaskSchema.parse(this.withActivity(scope, conversation))
+        return personalTaskSchema.parse(await this.withActivity(scope, conversation))
     }
 
     /**
@@ -612,7 +738,7 @@ export class ChatService {
                 task.status = action.status
             }
             const updated = personalTaskSchema.parse({ ...previous, task, updatedAt: new Date().toISOString() })
-            await this.store.save(scope, updated)
+            await this.saveSnapshot(scope, updated)
             return updated
         })
     }
@@ -632,17 +758,32 @@ export class ChatService {
             const agent = await this.agents.get(scope, agentId)
             return { ...agent, systemPrompt: agent.systemPrompt.trim() ? agent.systemPrompt : this.config.systemPrompt }
         }
+        const personal = await this.accounts?.defaultModel(scope)
         return {
             id: randomUUID(),
             name: '通用助手',
             description: '系统默认助手',
-            modelId: this.config.model,
+            modelId: personal?.modelId ?? this.config.model,
             systemPrompt: this.config.systemPrompt,
             toolIds: [],
             openingMessages: [],
             createdAt: now,
             updatedAt: now,
         }
+    }
+
+    /**
+     * Resolve one frozen personal route to its entire current private connection.
+     * @param scope - Authenticated account that owns this conversation.
+     * @param modelId - Frozen Agent route, or the deployment route for older records.
+     * @returns A consistent private connection, absent for deployment-owned models.
+     * @throws ServiceUnavailableException when a personal route was deleted or is foreign.
+     */
+    private async modelConnection(scope: ChatScope, modelId?: string): Promise<ModelConnection | undefined> {
+        if (!modelId?.startsWith('account:')) return undefined
+        const saved = await this.accounts?.getModel(scope, modelId.slice('account:'.length))
+        if (!saved) throw new ServiceUnavailableException('此对话使用的模型连接已删除或不可用，请到账户设置检查。')
+        return { apiKey: saved.apiKey, baseUrl: saved.public.baseUrl, model: saved.public.model }
     }
 
     /**
@@ -660,12 +801,49 @@ export class ChatService {
         if (this.turns.has(key) || this.mutations.has(key)) throw new ConflictException('这个任务正在处理中，请等待当前操作结束。')
         const done = Promise.withResolvers<void>()
         this.mutations.set(key, done.promise)
+        let reservation: CollaborationSourceReservation | undefined
+        const source = { kind: 'task' as const, id }
         try {
+            if (this.store.collaboration && /^[0-9a-f-]{36}$/i.test(id) && (await this.store.get(scope, id))) {
+                reservation = await this.store.collaboration.reserveSource(scope, source, randomUUID(), this.config.timeoutMs + 30_000)
+                if (reservation.bound) {
+                    const page = await this.store.collaboration.sourceEvents(scope, source)
+                    if (page.nodes.some(node => ['running', 'waiting-owner', 'waiting-upstream'].includes(node.status)))
+                        throw new ConflictException('此任务有活跃协作依赖，请先在协作节点处理或取消。')
+                }
+                this.sourceMutations.set(key, reservation)
+            }
             return await action()
+        } catch (error) {
+            if (error instanceof TemplateConflictError) throw new ConflictException(error.message)
+            if (this.store.collaboration) return collaborationFailure(error)
+            throw error
         } finally {
+            this.sourceMutations.delete(key)
+            if (reservation) await this.store.collaboration?.releaseSource(scope, source, reservation.token)
             this.mutations.delete(key)
             done.resolve()
         }
+    }
+
+    /**
+     * Saves task mutations using the same durable source revision as background execution.
+     * @param scope - Actual private owner.
+     * @param snapshot - Complete owned conversation snapshot.
+     * @returns After the current writer commits.
+     * @throws Error when the source was changed or its writer lease expired.
+     */
+    private async saveSnapshot(scope: ChatScope, snapshot: ChatConversation): Promise<void> {
+        const reservation = this.sourceMutations.get(turnKey(scope, snapshot.id))
+        if (reservation && this.store.collaboration)
+            reservation.revision = await this.store.collaboration.saveSource(
+                scope,
+                { kind: snapshot.task ? 'task' : 'conversation', id: snapshot.id },
+                snapshot,
+                reservation.revision,
+                reservation.token
+            )
+        else await this.store.save(scope, snapshot)
     }
 
     /**
@@ -674,9 +852,16 @@ export class ChatService {
      * @param conversation - Detached persisted conversation.
      * @returns A snapshot that never reports a prior process's request as live.
      */
-    private withActivity(scope: ChatScope, conversation: ChatConversation): ChatConversation {
+    private async withActivity(scope: ChatScope, conversation: ChatConversation): Promise<ChatConversation> {
+        if (this.store.collaboration) {
+            const persisted = await this.store.collaboration.loadSource(scope, {
+                kind: conversation.task ? 'task' : 'conversation',
+                id: conversation.id,
+            })
+            if (persisted?.bound) return persisted.conversation
+        }
         const snapshot = { ...conversation }
-        delete snapshot.activeRequestId
+        if (!this.store.collaboration) delete snapshot.activeRequestId
         const active = this.turns.get(turnKey(scope, conversation.id))
         return { ...snapshot, ...(active ? { activeRequestId: active.requestId } : {}) }
     }
@@ -749,6 +934,63 @@ export class ChatService {
         mode: ExecutionMode
     ): Promise<void> {
         if (this.closing) throw new ServiceUnavailableException('聊天服务正在关闭，请稍后重试。')
+        if (mode === 'chat' && this.collaboration && (await this.collaboration.isBound(scope, { kind: 'task', id }))) mode = 'task-message'
+        const source = { kind: mode === 'chat' ? ('conversation' as const) : ('task' as const), id }
+        const mentions = 'mentions' in input ? input.mentions : undefined
+        if ('humanResponse' in input && input.humanResponse) {
+            if (!this.collaboration || !this.store.collaboration?.decideHuman)
+                throw new ServiceUnavailableException('人工请求服务暂不可用，请保留答案后重试。')
+            if (mentions?.length) throw new BadRequestException('回答本人问题时不能同时发起对外联络。')
+            await this.get(scope, id)
+            const answered = await this.collaboration.query(store =>
+                store.decideHuman(scope, source, {
+                    requestId: input.requestId,
+                    humanRequestId: input.humanResponse!.requestId,
+                    version: input.humanResponse!.version,
+                    decision: 'answer',
+                    answer: (input as SendChatMessage).content,
+                })
+            )
+            emit({ type: 'start', conversationId: id, requestId: input.requestId })
+            emit({ type: 'done', conversation: answered })
+            return
+        }
+        if (this.collaboration && 'content' in input && !mentions?.length) {
+            const literal = input.content.replace(/```[\s\S]*?(?:```|$)|`[^`\n]*`|^\s*>.*$/gm, '')
+            if (/^\s*@[^\s@]+/m.test(literal)) {
+                const previous = await this.store.get(scope, id)
+                if (
+                    !previous?.messages.some(
+                        message => message.role === 'user' && message.requestId === input.requestId && message.content === input.content
+                    )
+                )
+                    throw new BadRequestException('请从 @ 菜单选择要联系的同事；选择后发送，系统才能确定真实收件人。')
+            }
+        }
+        if (this.collaboration && (this.durableChat || Boolean(mentions?.length) || (await this.collaboration.isBound(scope, source)))) {
+            const original = await this.store.get(scope, id)
+            if (!original || (mode === 'chat' ? Boolean(original.task) : !original.task)) throw new NotFoundException('未找到原工作对话。')
+            if (original.task?.status === 'completed') throw new ConflictException('任务已完成，请先恢复任务。')
+            if (original.task) {
+                if (mode === 'task-start' && original.task.started) {
+                    const first = original.messages.find(message => message.role === 'user')
+                    if (first?.requestId !== input.requestId) throw new ConflictException('任务已经开始，请在原任务中继续补充消息。')
+                    emit({ type: 'done', conversation: await this.withActivity(scope, original) })
+                    return
+                }
+                if (mode === 'task-message' && !original.task.started) throw new ConflictException('请先开始执行这个任务。')
+            }
+            const content = mode === 'task-start' ? original.task!.goal : (input as SendChatMessage).content
+            const accepted = await this.collaboration.accept(scope, source, {
+                requestId: input.requestId,
+                content,
+                ...(mentions ? { mentions } : {}),
+            })
+            emit({ type: 'start', conversationId: id, requestId: input.requestId })
+            emit({ type: 'done', conversation: accepted })
+            return
+        }
+        if (this.closing) throw new ServiceUnavailableException('聊天服务正在关闭，请稍后重试。')
         const key = turnKey(scope, id)
         if (this.turns.has(key) || this.mutations.has(key)) throw new ConflictException('这段对话正在处理中，请先停止或等待完成。')
         if (this.turns.size >= 20) throw new HttpException('当前请求较多，请稍后再试。', HttpStatus.TOO_MANY_REQUESTS)
@@ -766,9 +1008,12 @@ export class ChatService {
         const abort = (): void => controller.abort()
         signal.addEventListener('abort', abort, { once: true })
         if (signal.aborted) controller.abort()
+        let reservation: CollaborationSourceReservation | undefined
         try {
+            if (this.store.collaboration)
+                reservation = await this.store.collaboration.reserveSource(scope, source, input.requestId, this.config.timeoutMs + 30_000)
             // Reserve before the first asynchronous read so a delayed snapshot cannot overwrite a newer completed turn.
-            const conversation = await this.store.get(scope, id)
+            const conversation = reservation?.conversation ?? (await this.store.get(scope, id))
             if (!conversation || (mode === 'chat' ? Boolean(conversation.task) : !conversation.task))
                 throw new NotFoundException(mode === 'chat' ? '未找到这段对话。' : '未找到这个任务。')
             if (conversation.task) {
@@ -799,6 +1044,9 @@ export class ChatService {
             if (userIndex >= 0 && conversation.messages.slice(userIndex + 1).some(message => message.role === 'user'))
                 throw new ConflictException('这条消息之后已有新的对话，请重新发送问题。')
             if (!this.runtime) throw new ServiceUnavailableException('请在服务端配置 DEEPSEEK_API_KEY 后重启服务。')
+            const connection = await this.modelConnection(scope, conversation.agent?.modelId)
+            if (this.accounts && !connection && !this.config.apiKey)
+                throw new ServiceUnavailableException('请先在账户设置中添加模型连接并设为默认。')
             const history = userIndex >= 0 ? conversation.messages.slice(0, userIndex) : conversation.messages
             const now = new Date().toISOString()
             const user: ChatMessage =
@@ -826,14 +1074,24 @@ export class ChatService {
                     ? { task: { ...conversation.task!, started: true, status: 'in-progress' as const } }
                     : {}),
             }
-            await this.store.save(scope, pending)
+            if (reservation && this.store.collaboration)
+                reservation.revision = await this.store.collaboration.saveSource(
+                    scope,
+                    source,
+                    pending,
+                    reservation.revision,
+                    reservation.token
+                )
+            else await this.saveSnapshot(scope, pending)
             emit({ type: 'start', conversationId: id, requestId: input.requestId })
             try {
                 const result = await this.runtime.run({
                     scope,
                     conversationId: id,
+                    ...(this.folders ? { projectKnowledge: await this.folders.knowledgePort(scope, id) } : {}),
                     history,
                     ...(conversation.agent ? { agent: conversation.agent } : {}),
+                    ...(connection ? { connection } : {}),
                     content: prompt,
                     signal: controller.signal,
                     onDelta: delta => {
@@ -861,15 +1119,25 @@ export class ChatService {
                 requestId: input.requestId,
             }
             const result: ChatConversation = { ...settled, messages: [...history, user, assistant], updatedAt: assistant.createdAt }
-            await this.store.save(scope, result)
+            if (reservation && this.store.collaboration)
+                reservation.revision = await this.store.collaboration.saveSource(
+                    scope,
+                    source,
+                    result,
+                    reservation.revision,
+                    reservation.token
+                )
+            else await this.saveSnapshot(scope, result)
             done.resolve(result)
             if (failure) emit({ type: 'error', message: failure })
             else emit({ type: status === 'cancelled' ? 'cancelled' : 'done', conversation: result })
         } catch (error) {
             done.reject(error)
+            if (this.store.collaboration) return collaborationFailure(error)
             throw error
         } finally {
             signal.removeEventListener('abort', abort)
+            if (reservation) await this.store.collaboration?.releaseSource(scope, source, reservation.token)
             this.turns.delete(key)
         }
     }
@@ -883,12 +1151,37 @@ export class ChatService {
      * @throws ConflictException when the supplied id targets a different live turn.
      */
     async cancel(scope: ChatScope, id: string, requestId: string): Promise<ChatConversation> {
-        await this.get(scope, id)
+        const conversation = await this.get(scope, id)
+        if (conversation.task) return this.cancelTask(scope, id, requestId)
+        if (this.store.collaboration && (await this.collaboration?.isBound(scope, { kind: 'conversation', id })))
+            return this.collaboration!.query(store => store.cancelSource(scope, { kind: 'conversation', id }, requestId))
         const active = this.turns.get(turnKey(scope, id))
         if (!active) return this.get(scope, id)
         if (active.requestId !== requestId) throw new ConflictException('这条请求已结束，请刷新对话。')
         active.controller.abort()
         return active.done
+    }
+
+    /**
+     * Commit one exact owner decision without granting the model human authority.
+     * @param scope - Identity and workspace verified by the request guard.
+     * @param id - Private conversation or previously bound task identity.
+     * @param humanRequestId - Exact immutable preview being handled.
+     * @param input - Version and persistent action identity retained across retries.
+     * @returns The current private conversation after the atomic decision.
+     * @throws HttpException for an unavailable, stale or unauthorized request.
+     */
+    async decideHuman(scope: ChatScope, id: string, humanRequestId: string, input: HumanDecisionAction): Promise<ChatConversation> {
+        const conversation = await this.get(scope, id)
+        if (!this.collaboration || !this.store.collaboration?.decideHuman)
+            throw new ServiceUnavailableException('人工请求服务暂不可用，请稍后重试。')
+        return this.collaboration.query(store =>
+            store.decideHuman(
+                scope,
+                { kind: conversation.task ? 'task' : 'conversation', id },
+                { requestId: input.actionId, humanRequestId, version: input.version, decision: input.decision }
+            )
+        )
     }
 
     /**
@@ -902,6 +1195,10 @@ export class ChatService {
      */
     async cancelTask(scope: ChatScope, id: string, requestId: string): Promise<PersonalTask> {
         await this.getTask(scope, id)
+        if (this.store.collaboration && (await this.collaboration?.isBound(scope, { kind: 'task', id })))
+            return personalTaskSchema.parse(
+                await this.collaboration!.query(store => store.cancelSource(scope, { kind: 'task', id }, requestId))
+            )
         const active = this.turns.get(turnKey(scope, id))
         if (!active) return this.getTask(scope, id)
         if (active.requestId !== requestId) throw new ConflictException('这条请求已结束，请刷新任务。')
@@ -926,6 +1223,7 @@ export class ChatService {
         for (const activity of this.turns.values()) activity.controller.abort()
         await Promise.allSettled([...this.turns.values()].map(activity => activity.done))
         await Promise.allSettled([...this.mutations.values()])
+        await this.beforeClose?.()
         await this.runtime?.dispose()
         await this.store.close()
     }

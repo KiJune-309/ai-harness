@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentDefinition, PersonalTask } from '@ai-harness/contracts'
 import { expect, it } from 'vitest'
+import { registerSession } from './session-fixture.js'
 
 const token = 'sf002-local-persistence-test-server-token-20261017'
 
@@ -48,7 +49,7 @@ async function stop(child: ChildProcess | undefined): Promise<void> {
  * @param port - Isolated HTTP port.
  * @param modelUrl - Deterministic native DeepSeek fixture endpoint.
  * @param defaults - Deployment defaults changed across the process restart.
- * @param memory - Explicitly use a disposable process-local store for the reset check.
+ * @param memory - Supply the removed memory setting to verify that startup is rejected.
  * @returns A ready child API process.
  * @throws Error when startup cannot complete; diagnostics never contain credentials.
  */
@@ -57,6 +58,8 @@ async function boot(port: number, modelUrl: string, defaults: { model: string; p
         env: {
             ...process.env,
             HARNESS_API_TOKEN: token,
+            ACCOUNT_ENCRYPTION_KEY: 'a'.repeat(64),
+            OPENAI_ALLOWED_LOCAL_ORIGINS: modelUrl,
             HARNESS_WORKSPACE_ID: 'sf002-test',
             DATABASE_URL: memory ? '' : process.env.TEST_DATABASE_URL,
             CHAT_STORE: memory ? 'memory' : '',
@@ -71,14 +74,10 @@ async function boot(port: number, modelUrl: string, defaults: { model: string; p
     })
     for (let attempt = 0; attempt < 100; attempt += 1) {
         if (child.exitCode !== null) throw new Error('Isolated API process exited during startup.')
-        const response = await fetch(`http://127.0.0.1:${port}/api/chat/status`, {
-            headers: {
-                authorization: `Bearer ${token}`,
-                'x-harness-user-id': 'e7fc71da-553d-443c-ad1e-f7c66ce68839',
-                'x-harness-workspace-id': 'sf002-test',
-            },
+        const response = await fetch(`http://127.0.0.1:${port}/api/account/me`, {
+            headers: { authorization: `Bearer ${token}` },
         }).catch(() => undefined)
-        if (response?.ok) {
+        if (response?.status === 401) {
             await response.body?.cancel()
             return child
         }
@@ -108,6 +107,7 @@ it.skipIf(!process.env.TEST_DATABASE_URL)(
         const providerUrl = `http://127.0.0.1:${address.port}`
         const port = await availablePort()
         const user = randomUUID()
+        const sessions = new Map<string, string>()
         let child: ChildProcess | undefined
         /**
          * Call the isolated authenticated task API without exposing the database or provider credentials.
@@ -117,13 +117,17 @@ it.skipIf(!process.env.TEST_DATABASE_URL)(
          * @param identity - Optional alternate owner for isolation checks.
          * @returns The unconsumed HTTP response.
          */
-        function call(path: string, method = 'GET', body?: unknown, identity = user): Promise<Response> {
+        async function call(path: string, method = 'GET', body?: unknown, identity = user): Promise<Response> {
+            let session = sessions.get(identity)
+            if (!session) {
+                session = await registerSession(`http://127.0.0.1:${port}`, token, identity)
+                sessions.set(identity, session)
+            }
             return fetch(`http://127.0.0.1:${port}/api/chat${path}`, {
                 method,
                 headers: {
                     authorization: `Bearer ${token}`,
-                    'x-harness-user-id': identity,
-                    'x-harness-workspace-id': 'sf002-test',
+                    'x-harness-session': session,
                     'content-type': 'application/json',
                 },
                 ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -200,19 +204,9 @@ it.skipIf(!process.env.TEST_DATABASE_URL)(
             expect(bodies[1]?.messages[0]?.content).toBe('Original custom instructions.')
             expect(bodies[1]?.messages.some(message => message.role === 'user' && message.content === input.goal)).toBe(true)
             await stop(child)
-            child = await boot(port, providerUrl, { model: 'deepseek-flash', prompt: 'Memory test.' }, true)
-            const temporary = (await (
-                await call('/tasks', 'POST', {
-                    requestId: randomUUID(),
-                    title: 'Temporary task',
-                    goal: 'Only survive within this process.',
-                })
-            ).json()) as PersonalTask
-            expect((await call(`/tasks/${temporary.id}`)).status).toBe(200)
-            await stop(child)
-            child = await boot(port, providerUrl, { model: 'deepseek-flash', prompt: 'Memory test.' }, true)
-            expect((await call(`/tasks/${temporary.id}`)).status).toBe(404)
-            expect(await (await call('/tasks')).json()).toEqual({ tasks: [] })
+            await expect(boot(port, providerUrl, { model: 'deepseek-flash', prompt: 'Memory test.' }, true)).rejects.toThrow(
+                'exited during startup'
+            )
         } finally {
             await stop(child)
             await new Promise<void>((resolve, reject) => provider.close(error => (error ? reject(error) : resolve())))

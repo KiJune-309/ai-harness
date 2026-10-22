@@ -2,17 +2,19 @@ import { randomUUID } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { createChatRuntime, type ChatRuntime } from '@ai-harness/chat-runtime'
 import { agentDefinitionSchema, chatStreamEventSchema, personalTaskSchema, type ChatStreamEvent } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore, type ChatStore } from '@ai-harness/db'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiApp } from '../src/app.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
+import { sessionHeaders } from './session-fixture.js'
 
 const token = 'task-http-test-api-token-with-at-least-32-characters'
 const providerKey = 'private-task-provider-key'
 const config = readApiConfig({ HARNESS_API_TOKEN: token, CHAT_STORE: 'memory' })
 const userId = randomUUID()
 const applications: NestExpressApplication[] = []
+let currentStore: ChatStore
 
 /**
  * Start the actual Nest application with process-owned scoped memory persistence.
@@ -21,8 +23,9 @@ const applications: NestExpressApplication[] = []
  * @throws Error when initialization or local port binding fails.
  */
 async function start(runtime?: ChatRuntime): Promise<string> {
-    const store = await createChatStore({ allowMemory: true })
-    const app = await createApiApp(config, { store, runtime, logger: false })
+    const store = await createMemoryChatStore()
+    currentStore = store
+    const app = await createApiApp({ ...config, apiKey: runtime ? 'private-runtime-fixture-key' : '' }, { store, runtime, logger: false })
     applications.push(app)
     await app.listen(0, '127.0.0.1')
     const address = app.getHttpServer().address() as AddressInfo
@@ -30,17 +33,12 @@ async function start(runtime?: ChatRuntime): Promise<string> {
 }
 
 /**
- * Construct the trusted server-to-server authentication and ownership claims.
- * @param identity - Authenticated browser-session identity.
+ * Persist a real fixture account session and construct private HTTP headers.
+ * @param identity - Stable fixture user UUID whose real session is persisted.
  * @returns Request headers accepted by the API guard.
  */
-function headers(identity = userId): Record<string, string> {
-    return {
-        authorization: `Bearer ${token}`,
-        'x-harness-user-id': identity,
-        'x-harness-workspace-id': config.workspaceId,
-        'content-type': 'application/json',
-    }
+async function headers(identity = userId): Promise<Record<string, string>> {
+    return sessionHeaders(currentStore, config, identity)
 }
 
 /**
@@ -49,11 +47,11 @@ function headers(identity = userId): Record<string, string> {
  * @param path - Task, Agent or ordinary-conversation route.
  * @param body - Untrusted public JSON input.
  * @param method - Requested mutation method.
- * @param identity - Authenticated browser-session identity.
+ * @param identity - Stable fixture user UUID whose real session is persisted.
  * @returns The unconsumed HTTP response.
  */
-function mutate(base: string, path: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
-    return fetch(`${base}/${path}`, { method, headers: headers(identity), body: JSON.stringify(body) })
+async function mutate(base: string, path: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
+    return fetch(`${base}/${path}`, { method, headers: await headers(identity), body: JSON.stringify(body) })
 }
 
 /**
@@ -122,10 +120,10 @@ describe('personal task HTTP lifecycle and isolation', () => {
         expect(personalTaskSchema.parse(await replay.json())).toEqual(task)
         expect((await mutate(base, 'tasks', { requestId: task.id, title: task.title, goal: '不同目标' })).status).toBe(409)
         expect((await mutate(base, `tasks/${task.id}/start`, { requestId: randomUUID() })).status).toBe(503)
-        expect(await (await fetch(`${base}/tasks/${task.id}`, { headers: headers() })).json()).toEqual(task)
-        expect(await (await fetch(`${base}/tasks`, { headers: headers() })).json()).toEqual({ tasks: [task] })
-        expect(await (await fetch(`${base}/conversations`, { headers: headers() })).json()).toEqual({ conversations: [] })
-        expect((await fetch(`${base}/tasks/not-a-uuid`, { headers: headers() })).status).toBe(400)
+        expect(await (await fetch(`${base}/tasks/${task.id}`, { headers: await headers() })).json()).toEqual(task)
+        expect(await (await fetch(`${base}/tasks`, { headers: await headers() })).json()).toEqual({ tasks: [task] })
+        expect(await (await fetch(`${base}/conversations`, { headers: await headers() })).json()).toEqual({ conversations: [] })
+        expect((await fetch(`${base}/tasks/not-a-uuid`, { headers: await headers() })).status).toBe(400)
         expect((await mutate(base, `tasks/${task.id}/start`, { requestId: 'invalid' })).status).toBe(400)
         expect((await mutate(base, `tasks/${task.id}/status`, { status: 'unsupported' }, 'PUT')).status).toBe(400)
     })
@@ -183,7 +181,7 @@ describe('personal task HTTP lifecycle and isolation', () => {
         expect(firstBody.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(['calculator'])
         expect(secondBody.messages.filter((message: { content: string }) => message.content === task.task.goal)).toHaveLength(1)
         expect(secondBody.messages.at(-2)).toEqual({ role: 'assistant', content: '记住了海风项目。' })
-        const loaded = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${task.id}`, { headers: headers() })).json())
+        const loaded = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${task.id}`, { headers: await headers() })).json())
         expect(loaded.agent).toEqual(task.agent)
         expect(loaded.messages).toHaveLength(6)
         expect(JSON.stringify({ loaded, first, second })).not.toContain(providerKey)
@@ -199,10 +197,10 @@ describe('personal task HTTP lifecycle and isolation', () => {
         expect((await fetch(`${base}/tasks`)).status).toBe(401)
         const task = await create(base, { title: 'PRIVATE_TASK_SENTINEL', goal: 'PRIVATE_GOAL_SENTINEL' })
         const foreign = randomUUID()
-        const list = await fetch(`${base}/tasks`, { headers: headers(foreign) })
+        const list = await fetch(`${base}/tasks`, { headers: await headers(foreign) })
         expect(await list.json()).toEqual({ tasks: [] })
         const responses = [
-            await fetch(`${base}/tasks/${task.id}`, { headers: headers(foreign) }),
+            await fetch(`${base}/tasks/${task.id}`, { headers: await headers(foreign) }),
             await mutate(base, `tasks/${task.id}/status`, { status: 'completed' }, 'PUT', foreign),
             await mutate(base, `tasks/${task.id}/start`, { requestId: randomUUID() }, 'POST', foreign),
             await mutate(base, `tasks/${task.id}/messages`, { requestId: randomUUID(), content: 'foreign' }, 'POST', foreign),
@@ -215,9 +213,10 @@ describe('personal task HTTP lifecycle and isolation', () => {
             expect(body).not.toContain(task.agent.systemPrompt)
         }
         const wrongWorkspace = await fetch(`${base}/tasks/${task.id}`, {
-            headers: { ...headers(), 'x-harness-workspace-id': 'different-workspace' },
+            headers: { ...(await headers()), 'x-harness-workspace-id': 'different-workspace', 'x-harness-user-id': randomUUID() },
         })
-        expect(wrongWorkspace.status).toBe(401)
+        expect(wrongWorkspace.status).toBe(200)
+        expect(personalTaskSchema.parse(await wrongWorkspace.json())).toEqual(task)
         const privateAgent = agentDefinitionSchema.parse(
             await (
                 await mutate(base, 'agents', {
@@ -241,7 +240,7 @@ describe('personal task HTTP lifecycle and isolation', () => {
                 )
             ).status
         ).toBe(404)
-        expect(await (await fetch(`${base}/tasks`, { headers: headers(foreign) })).json()).toEqual({ tasks: [] })
+        expect(await (await fetch(`${base}/tasks`, { headers: await headers(foreign) })).json()).toEqual({ tasks: [] })
         expect(runtime.run).not.toHaveBeenCalled()
     })
 
@@ -261,7 +260,7 @@ describe('personal task HTTP lifecycle and isolation', () => {
         expect(complete.task.previousStatus).toBe('needs-input')
         expect((await mutate(base, `tasks/${task.id}/start`, { requestId: randomUUID() })).status).toBe(409)
         expect((await mutate(base, `tasks/${task.id}/messages`, { requestId: randomUUID(), content: 'completed' })).status).toBe(409)
-        expect((await fetch(`${base}/conversations/${task.id}`, { headers: headers() })).status).toBe(404)
+        expect((await fetch(`${base}/conversations/${task.id}`, { headers: await headers() })).status).toBe(404)
         expect((await mutate(base, `conversations/${task.id}/messages`, { requestId: randomUUID(), content: 'bypass' })).status).toBe(404)
         expect((await mutate(base, `conversations/${task.id}/cancel`, { requestId: randomUUID() })).status).toBe(404)
         const restored = personalTaskSchema.parse(await (await mutate(base, `tasks/${task.id}/status`, { restore: true }, 'PUT')).json())
@@ -272,7 +271,7 @@ describe('personal task HTTP lifecycle and isolation', () => {
         expect(runtime.run).toHaveBeenCalledTimes(2)
         expect(runtime.run.mock.calls[1]![0].history).toEqual(complete.messages)
         const ordinary = await (await mutate(base, 'conversations', {})).json()
-        expect((await fetch(`${base}/tasks/${ordinary.id}`, { headers: headers() })).status).toBe(404)
+        expect((await fetch(`${base}/tasks/${ordinary.id}`, { headers: await headers() })).status).toBe(404)
         expect((await mutate(base, `tasks/${ordinary.id}/start`, { requestId: randomUUID() })).status).toBe(404)
     })
 

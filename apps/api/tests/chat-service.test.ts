@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { ChatRuntimeError, type ChatRunInput, type ChatRuntime } from '@ai-harness/chat-runtime'
 import type { ChatStreamEvent } from '@ai-harness/contracts'
-import { createChatStore, type ChatStore } from '@ai-harness/db'
+import { createMemoryChatStore, type ChatStore } from '@ai-harness/db'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatService } from '../src/chat-service.js'
-import { readApiConfig } from '../src/config.js'
+import type { CollaborationService } from '../src/collaboration-service.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
 
 const scope = { userId: randomUUID(), workspaceId: 'personal' }
 const config = readApiConfig({ HARNESS_API_TOKEN: 'local-test-transport-token-of-sufficient-length', CHAT_STORE: 'memory' })
@@ -16,7 +17,7 @@ const services: ChatService[] = []
  * @returns The owned service, store, and recorded runtime calls.
  */
 async function fixture(run: ChatRuntime['run'] = async () => ({ content: '回答', reasoning: '', status: 'complete' })) {
-    const store = await createChatStore({ allowMemory: true })
+    const store = await createMemoryChatStore()
     const runtime = { run: vi.fn(run), dispose: vi.fn(async () => undefined) }
     const service = new ChatService(store, runtime, config)
     services.push(service)
@@ -53,6 +54,32 @@ afterEach(async () => {
 })
 
 describe('ChatService durable user-turn coordination', () => {
+    it('opens legacy bound collaboration Tasks through normal chat APIs while isolating ordinary private Tasks', async () => {
+        const { store, runtime, service: original } = await fixture()
+        const incoming = await original.createTask(scope, { requestId: randomUUID(), title: '同事来信', goal: '请评估问题' })
+        const personal = await original.createTask(scope, { requestId: randomUUID(), title: '个人任务', goal: '个人计划' })
+        const accept = vi.fn(async () => incoming)
+        const collaboration = {
+            isBound: vi.fn<CollaborationService['isBound']>(async (_scope, source) => source.kind === 'task' && source.id === incoming.id),
+            accept,
+        } as unknown as CollaborationService
+        const chat = new ChatService(store, runtime, config, undefined, undefined, collaboration)
+        services.push(chat)
+        // Historical received Tasks were already started, unlike ordinary manually created Tasks.
+        incoming.task.started = true
+        incoming.task.status = 'in-progress'
+        await store.save(scope, incoming)
+        expect((await chat.list(scope)).map(item => item.id)).toContain(incoming.id)
+        expect((await chat.list(scope)).map(item => item.id)).not.toContain(personal.id)
+        expect((await chat.get(scope, incoming.id)).id).toBe(incoming.id)
+        await expect(chat.get(scope, personal.id)).rejects.toMatchObject({ status: 404 })
+        await expect(chat.get({ ...scope, userId: randomUUID() }, incoming.id)).rejects.toMatchObject({ status: 404 })
+        const requestId = randomUUID()
+        await send(chat, incoming.id, requestId, '帮我问一下发件人')
+        expect(accept).toHaveBeenCalledWith(scope, { kind: 'task', id: incoming.id }, { requestId, content: '帮我问一下发件人' })
+        expect(runtime.run).not.toHaveBeenCalled()
+    })
+
     it('replays completed request IDs after recreating the service without duplicate model calls or messages', async () => {
         const { service, store, runtime } = await fixture()
         const conversation = await service.create(scope)
@@ -182,13 +209,13 @@ describe('ChatService durable user-turn coordination', () => {
     })
 
     it('refuses unconfigured model execution before changing the saved conversation', async () => {
-        const store: ChatStore = await createChatStore({ allowMemory: true })
+        const store: ChatStore = await createMemoryChatStore()
         const service = new ChatService(store, undefined, config)
         services.push(service)
         const conversation = await service.create(scope)
         await expect(send(service, conversation.id, randomUUID())).rejects.toMatchObject({ status: 503 })
         expect(await service.get(scope, conversation.id)).toEqual(conversation)
-        expect(service.status()).toEqual({ configured: false, model: config.model, storage: 'memory' })
+        expect(service.status()).toEqual({ configured: false, model: config.model, storage: 'postgres' })
     })
 
     it('passes only trusted ownership and saved prior messages to the runtime', async () => {

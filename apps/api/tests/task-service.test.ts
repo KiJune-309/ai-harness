@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type { ChatRuntime } from '@ai-harness/chat-runtime'
 import type { ChatStreamEvent, CreateTask } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore } from '@ai-harness/db'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentService } from '../src/agent-service.js'
 import { createAgentCatalog } from '../src/agent-catalog.js'
 import { ChatService } from '../src/chat-service.js'
-import { readApiConfig, type ApiConfig } from '../src/config.js'
+import type { ApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
 
 const scope = { userId: randomUUID(), workspaceId: 'personal' }
 const config = readApiConfig({ HARNESS_API_TOKEN: 'task-test-transport-token-of-sufficient-length', CHAT_STORE: 'memory' })
@@ -27,7 +28,7 @@ async function success() {
  * @returns The initialized service and its observable dependencies.
  */
 async function fixture(run: ChatRuntime['run'] | null = success, settings: Partial<ApiConfig> = {}) {
-    const store = await createChatStore({ allowMemory: true })
+    const store = await createMemoryChatStore()
     const runtime = run ? { run: vi.fn(run), dispose: vi.fn(async () => undefined) } : undefined
     const deployment = { ...config, ...settings }
     const agents = new AgentService(store.agents, createAgentCatalog(deployment, Boolean(runtime)))

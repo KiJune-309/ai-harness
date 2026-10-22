@@ -2,11 +2,12 @@ import {
     cancelChatMessageSchema,
     createConversationSchema,
     sendChatMessageSchema,
+    humanDecisionActionSchema,
     type ChatConversation,
     type ChatStatus,
     type ChatStreamEvent,
 } from '@ai-harness/contracts'
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Req, Res } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Delete, Get, Inject, Param, Post, Req, Res } from '@nestjs/common'
 import type { Response } from 'express'
 import type { ChatRequest } from './auth.js'
 import { ChatService } from './chat-service.js'
@@ -34,11 +35,12 @@ export class ChatController {
 
     /**
      * Return the model connection state for the signed browser session.
+     * @param request - Request with a validated account session.
      * @returns Safe public configuration state.
      */
     @Get('status')
-    status(): ChatStatus {
-        return this.service.status()
+    status(@Req() request: ChatRequest): Promise<ChatStatus> {
+        return this.service.statusFor(request.chatScope)
     }
 
     /**
@@ -62,7 +64,10 @@ export class ChatController {
     create(@Req() request: ChatRequest, @Body() body: unknown): Promise<ChatConversation> {
         const parsed = createConversationSchema.safeParse(body)
         if (!parsed.success) throw new BadRequestException('对话标题格式不正确。')
-        return this.service.create(request.chatScope, parsed.data.title, parsed.data.agentId)
+        return this.service.create(request.chatScope, parsed.data.title, parsed.data.agentId, {
+            projectFolderId: parsed.data.projectFolderId,
+            requestId: parsed.data.requestId,
+        })
     }
 
     /**
@@ -74,6 +79,18 @@ export class ChatController {
     @Get('conversations/:id')
     get(@Req() request: ChatRequest, @Param('id') id: string): Promise<ChatConversation> {
         return this.service.get(request.chatScope, conversationId(id))
+    }
+
+    /**
+     * Deletes only the authenticated owner's ordinary conversation.
+     * @param request - Request with verified account and workspace authorization.
+     * @param id - Untrusted exact conversation UUID.
+     * @returns The durable deletion receipt without any removed private content.
+     * @throws BadRequestException for a malformed conversation identity.
+     */
+    @Delete('conversations/:id')
+    remove(@Req() request: ChatRequest, @Param('id') id: string): Promise<{ id: string; deleted: true }> {
+        return this.service.remove(request.chatScope, conversationId(id))
     }
 
     /**
@@ -89,6 +106,27 @@ export class ChatController {
         const parsed = cancelChatMessageSchema.safeParse(body)
         if (!parsed.success) throw new BadRequestException('停止请求的格式不正确。')
         return this.service.cancel(request.chatScope, conversationId(id), parsed.data.requestId)
+    }
+
+    /**
+     * Apply an authenticated human decision to the exact persisted preview.
+     * @param request - Request authenticated by the account and workspace guard.
+     * @param id - Private source conversation identity.
+     * @param requestId - Immutable human request identity.
+     * @param body - Untrusted decision, expected version and retry identity.
+     * @returns The private current conversation after the decision commits.
+     * @throws BadRequestException for malformed identities or action fields.
+     */
+    @Post('conversations/:id/human-requests/:requestId/decisions')
+    decideHuman(
+        @Req() request: ChatRequest,
+        @Param('id') id: string,
+        @Param('requestId') requestId: string,
+        @Body() body: unknown
+    ): Promise<ChatConversation> {
+        const parsed = humanDecisionActionSchema.safeParse(body)
+        if (!parsed.success) throw new BadRequestException('人工决定的格式不正确，请刷新当前请求后重试。')
+        return this.service.decideHuman(request.chatScope, conversationId(id), conversationId(requestId), parsed.data)
     }
 
     /**

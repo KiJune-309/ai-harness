@@ -2,17 +2,24 @@ import { randomUUID } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { createChatRuntime, type ChatRuntime } from '@ai-harness/chat-runtime'
 import { chatConversationSchema, chatStreamEventSchema, type ChatStreamEvent } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore, type ChatStore } from '@ai-harness/db'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiApp } from '../src/app.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
+import { sessionHeaders } from './session-fixture.js'
 
 const token = 'private-test-api-token-with-at-least-32-characters'
 const providerKey = 'private-test-deepseek-key'
 const userId = randomUUID()
-const config = readApiConfig({ HARNESS_API_TOKEN: token, CHAT_STORE: 'memory', DEEPSEEK_API_KEY: providerKey })
+const config = readApiConfig({
+    HARNESS_API_TOKEN: token,
+    CHAT_STORE: 'memory',
+    DEEPSEEK_API_KEY: providerKey,
+    DEEPSEEK_SYSTEM_PROMPT: 'API integration test system prompt.',
+})
 const applications: NestExpressApplication[] = []
+let currentStore: ChatStore
 
 /**
  * Encode a provider delta using the DeepSeek Chat Completions SSE protocol.
@@ -46,7 +53,8 @@ function providerResponse(content: string, reasoning = ''): Response {
  * @throws Error when application initialization or local port binding fails.
  */
 async function start(runtime?: ChatRuntime): Promise<string> {
-    const store = await createChatStore({ allowMemory: true })
+    const store = await createMemoryChatStore()
+    currentStore = store
     const app = await createApiApp({ ...config, ...(runtime ? {} : { apiKey: '' }) }, { store, runtime, logger: false })
     applications.push(app)
     await app.listen(0, '127.0.0.1')
@@ -55,17 +63,12 @@ async function start(runtime?: ChatRuntime): Promise<string> {
 }
 
 /**
- * Construct the trusted server-to-server request context for a user.
+ * Persist a real fixture account session and construct private HTTP headers.
  * @param identity - User UUID established by the Web server session.
  * @returns HTTP headers accepted by the API authorization guard.
  */
-function headers(identity = userId): Record<string, string> {
-    return {
-        authorization: `Bearer ${token}`,
-        'x-harness-user-id': identity,
-        'x-harness-workspace-id': config.workspaceId,
-        'content-type': 'application/json',
-    }
+async function headers(identity = userId): Promise<Record<string, string>> {
+    return sessionHeaders(currentStore, config, identity)
 }
 
 /**
@@ -75,7 +78,7 @@ function headers(identity = userId): Record<string, string> {
  * @returns The persisted public conversation.
  */
 async function createConversation(baseUrl: string, identity = userId) {
-    const response = await fetch(`${baseUrl}/conversations`, { method: 'POST', headers: headers(identity), body: JSON.stringify({}) })
+    const response = await fetch(`${baseUrl}/conversations`, { method: 'POST', headers: await headers(identity), body: JSON.stringify({}) })
     expect(response.status).toBe(201)
     return chatConversationSchema.parse(await response.json())
 }
@@ -107,7 +110,7 @@ function events(payload: string): ChatStreamEvent[] {
 async function message(baseUrl: string, conversationId: string, content: string, requestId = randomUUID()): Promise<Response> {
     return fetch(`${baseUrl}/conversations/${conversationId}/messages`, {
         method: 'POST',
-        headers: headers(),
+        headers: await headers(),
         body: JSON.stringify({ content, requestId }),
     })
 }
@@ -117,15 +120,15 @@ afterEach(async () => {
 })
 
 describe('Nest HTTP API and real Cordis runtime', () => {
-    it('rejects missing and forged authentication or ownership claims before returning configuration', async () => {
+    it('requires a persisted session and ignores forged ownership headers', async () => {
         const baseUrl = await start()
         for (const invalidHeaders of [
             {},
-            { ...headers(), authorization: 'Bearer forged-credential' },
-            { ...headers(), authorization: '' },
-            { ...headers(), 'x-harness-user-id': '' },
-            { ...headers(), 'x-harness-user-id': 'forged-non-uuid-user' },
-            { ...headers(), 'x-harness-workspace-id': 'another-workspace' },
+            { ...(await headers()), authorization: 'Bearer forged-credential' },
+            { ...(await headers()), authorization: '' },
+            { ...(await headers()), 'x-harness-session': '' },
+            { ...(await headers()), 'x-harness-session': 'a'.repeat(43) },
+            { authorization: `Bearer ${token}`, 'x-harness-user-id': userId, 'x-harness-workspace-id': config.workspaceId },
         ]) {
             const response = await fetch(`${baseUrl}/status`, { headers: invalidHeaders })
             expect(response.status).toBe(401)
@@ -133,8 +136,13 @@ describe('Nest HTTP API and real Cordis runtime', () => {
             expect(body).not.toContain(token)
             expect(body).not.toContain(providerKey)
         }
-        const valid = await fetch(`${baseUrl}/status`, { headers: headers() })
-        expect(await valid.json()).toEqual({ configured: false, model: config.model, storage: 'memory' })
+        const valid = await fetch(`${baseUrl}/status`, { headers: await headers() })
+        expect(await valid.json()).toEqual({ configured: false, model: config.model, storage: 'postgres' })
+        const forgedClaims = await fetch(`${baseUrl}/conversations`, {
+            headers: { ...(await headers()), 'x-harness-user-id': randomUUID(), 'x-harness-workspace-id': 'forged-workspace' },
+        })
+        expect(forgedClaims.status).toBe(200)
+        expect(await forgedClaims.json()).toEqual({ conversations: [] })
     })
 
     it('enforces conversation ownership and validates public bodies before starting an SSE stream', async () => {
@@ -142,7 +150,7 @@ describe('Nest HTTP API and real Cordis runtime', () => {
         const runtime = await createChatRuntime({ apiKey: providerKey, fetch: providerFetch })
         const baseUrl = await start(runtime)
         const created = await createConversation(baseUrl)
-        const other = headers(randomUUID())
+        const other = await headers(randomUUID())
         const foreignList = await fetch(`${baseUrl}/conversations`, { headers: other })
         expect(await foreignList.json()).toEqual({ conversations: [] })
         const foreignRead = await fetch(`${baseUrl}/conversations/${created.id}`, { headers: other })
@@ -156,12 +164,12 @@ describe('Nest HTTP API and real Cordis runtime', () => {
         expect(foreignSend.headers.get('content-type')).toContain('application/json')
         const invalid = await fetch(`${baseUrl}/conversations/${created.id}/messages`, {
             method: 'POST',
-            headers: headers(),
+            headers: await headers(),
             body: JSON.stringify({ content: '', requestId: randomUUID(), userId }),
         })
         expect(invalid.status).toBe(400)
         expect(invalid.headers.get('content-type')).toContain('application/json')
-        const invalidId = await fetch(`${baseUrl}/conversations/not-a-uuid`, { headers: headers() })
+        const invalidId = await fetch(`${baseUrl}/conversations/not-a-uuid`, { headers: await headers() })
         expect(invalidId.status).toBe(400)
         expect(providerFetch).not.toHaveBeenCalled()
     })
@@ -209,14 +217,14 @@ describe('Nest HTTP API and real Cordis runtime', () => {
             { role: 'user', content: '第二轮问题' },
         ])
         const loaded = chatConversationSchema.parse(
-            await (await fetch(`${baseUrl}/conversations/${created.id}`, { headers: headers() })).json()
+            await (await fetch(`${baseUrl}/conversations/${created.id}`, { headers: await headers() })).json()
         )
         expect(loaded.messages.map(item => item.content)).toEqual(['第一轮问题', '第一轮回答', '第二轮问题', '第二轮回答'])
-        const listed = await (await fetch(`${baseUrl}/conversations`, { headers: headers() })).json()
+        const listed = await (await fetch(`${baseUrl}/conversations`, { headers: await headers() })).json()
         expect(listed.conversations).toEqual([loaded])
         expect(JSON.stringify({ first, second, listed })).not.toContain(providerKey)
         expect(JSON.stringify({ first, second, listed })).not.toContain(token)
-        expect(JSON.stringify({ first, second, listed })).not.toContain('API integration test system prompt.')
+        expect(loaded.agent?.systemPrompt).toBe(config.systemPrompt)
     })
 
     it('redacts provider failures while recording an unsuccessful assistant turn', async () => {
@@ -233,7 +241,7 @@ describe('Nest HTTP API and real Cordis runtime', () => {
         expect(streamed.filter(event => ['done', 'cancelled', 'error'].includes(event.type))).toHaveLength(1)
         expect(payload).not.toContain(providerKey)
         expect(payload).not.toContain('provider body')
-        const loaded = await (await fetch(`${baseUrl}/conversations/${created.id}`, { headers: headers() })).json()
+        const loaded = await (await fetch(`${baseUrl}/conversations/${created.id}`, { headers: await headers() })).json()
         expect(loaded.messages.at(-1)).toMatchObject({ role: 'assistant', status: 'error', content: '' })
         expect(loaded.activeRequestId).toBeUndefined()
     })
@@ -281,13 +289,13 @@ describe('Nest HTTP API and real Cordis runtime', () => {
         expect(conflict.headers.get('content-type')).toContain('application/json')
         const stale = await fetch(`${baseUrl}/conversations/${created.id}/cancel`, {
             method: 'POST',
-            headers: headers(),
+            headers: await headers(),
             body: JSON.stringify({ requestId: randomUUID() }),
         })
         expect(stale.status).toBe(409)
         const stop = await fetch(`${baseUrl}/conversations/${created.id}/cancel`, {
             method: 'POST',
-            headers: headers(),
+            headers: await headers(),
             body: JSON.stringify({ requestId }),
         })
         expect(stop.ok).toBe(true)
@@ -336,7 +344,7 @@ describe('Nest HTTP API and real Cordis runtime', () => {
         const disconnected = new AbortController()
         const response = await fetch(`${baseUrl}/conversations/${created.id}/messages`, {
             method: 'POST',
-            headers: headers(),
+            headers: await headers(),
             body: JSON.stringify({ content: '随后断开的请求', requestId }),
             signal: disconnected.signal,
         })
@@ -353,7 +361,7 @@ describe('Nest HTTP API and real Cordis runtime', () => {
         reader.releaseLock()
         await expect
             .poll(async () => {
-                const loaded = await (await fetch(`${baseUrl}/conversations/${created.id}`, { headers: headers() })).json()
+                const loaded = await (await fetch(`${baseUrl}/conversations/${created.id}`, { headers: await headers() })).json()
                 return loaded.messages.at(-1)
             })
             .toMatchObject({ role: 'assistant', content: 'saved-on-disconnect', status: 'cancelled', requestId })

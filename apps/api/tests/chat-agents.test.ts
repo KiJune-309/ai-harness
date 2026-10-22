@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import type { ChatRuntime } from '@ai-harness/chat-runtime'
 import type { AgentInput, ChatStreamEvent } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore } from '@ai-harness/db'
 import { describe, expect, it, vi } from 'vitest'
 import { createAgentCatalog } from '../src/agent-catalog.js'
 import { AgentService } from '../src/agent-service.js'
 import { ChatService } from '../src/chat-service.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
 
 const scope = { userId: randomUUID(), workspaceId: 'personal' }
 const config = readApiConfig({ HARNESS_API_TOKEN: 'chat-agent-test-server-token-long-enough', CHAT_STORE: 'memory' })
@@ -34,7 +34,7 @@ async function send(chat: ChatService, id: string, content: string): Promise<Cha
 
 describe('saved Agent conversation configuration', () => {
     it('persists ordered greetings once and executes the authorized frozen model, prompt, and tool snapshot', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         const agents = new AgentService(store.agents, createAgentCatalog(config, true))
         const runtime = {
             run: vi.fn<ChatRuntime['run']>(async () => ({ content: '42', reasoning: '', status: 'complete' })),
@@ -66,7 +66,7 @@ describe('saved Agent conversation configuration', () => {
     })
 
     it('refuses a foreign Agent before creating a conversation or revealing its configuration', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         const agents = new AgentService(store.agents, createAgentCatalog(config, true))
         const chat = new ChatService(store, undefined, config, agents)
         try {
