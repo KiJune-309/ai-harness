@@ -1,0 +1,23 @@
+{
+	http_port {$HTTP_PORT:80}
+	https_port {$HTTPS_PORT:443}
+	# Preserve the chosen external HTTPS port instead of Caddy's default redirect target.
+	auto_https disable_redirects
+}
+
+http://{$APP_DOMAIN:localhost}:{$HTTP_PORT:80} {
+	redir https://{$APP_DOMAIN:localhost}:{$HTTPS_PORT:443}{uri} 308
+}
+
+https://{$APP_DOMAIN:localhost}:{$HTTPS_PORT:443} {
+	# Keep every browser request on Next.js, including /api/*: its server routes
+	# validate the browser origin/session and add the private API service token.
+	reverse_proxy web:3000 {
+		# Next.js/Node closes idle HTTP connections after about five seconds.
+		transport http {
+			keepalive 4s
+		}
+		# Caddy flushes text/event-stream automatically. Do not use a negative
+		# flush_interval: that prevents cancellation when the browser disconnects.
+	}
+}

@@ -30,11 +30,20 @@
         "build:core": "tsc -b packages/core/tsconfig.json",
         "typecheck:core": "tsc -p packages/core/tsconfig.check.json",
         "dev": "node scripts/dev.mjs",
+        "db:up": "node scripts/local-database.mjs up",
+        "db:stop": "node scripts/local-database.mjs stop",
         "dev:api": "pnpm --filter @ai-harness/api dev",
         "build:api": "node scripts/build-server.mjs",
         "start:api": "pnpm --filter @ai-harness/api start",
         "typecheck:api": "pnpm --filter @ai-harness/api typecheck",
-        "build:contracts": "pnpm --filter @ai-harness/contracts build"
+        "build:contracts": "pnpm --filter @ai-harness/contracts build",
+        "objects:up": "node scripts/local-object-storage.mjs up",
+        "objects:stop": "node scripts/local-object-storage.mjs stop",
+        "deploy:init": "node scripts/init-deployment.mjs",
+        "deploy:build": "docker compose -f infra/build.compose.yaml build",
+        "deploy:up": "docker compose --env-file infra/.env.production -f infra/production.compose.yaml up -d --wait --wait-timeout 180",
+        "deploy:logs": "docker compose --env-file infra/.env.production -f infra/production.compose.yaml logs -f --tail=100 caddy web api",
+        "deploy:stop": "docker compose --env-file infra/.env.production -f infra/production.compose.yaml stop"
     },
     "devDependencies": {
         "@commitlint/cli": "^21.2.3",

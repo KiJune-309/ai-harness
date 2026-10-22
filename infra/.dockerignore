@@ -1,0 +1,3 @@
+# PostgreSQL builds download their pinned sources and need no local context files.
+# In particular, never send infra/.env.production to the image builder.
+**

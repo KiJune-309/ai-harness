@@ -1,0 +1,30 @@
+# Image packaging only: no running services, environment file or private keys required.
+# Build on the target Windows computer to use its Docker Linux architecture.
+name: ai-harness-build
+
+services:
+    web:
+        image: ai-harness-web:${HARNESS_IMAGE_TAG:-local}
+        build:
+            context: ..
+            dockerfile: infra/app.Dockerfile
+            target: web
+
+    api:
+        image: ai-harness-api:${HARNESS_IMAGE_TAG:-local}
+        build:
+            context: ..
+            dockerfile: infra/app.Dockerfile
+            target: api
+
+    postgres:
+        image: ai-harness-production-postgres:17-0.8.7
+        build:
+            context: .
+            dockerfile: postgres-vector.Dockerfile
+
+    minio:
+        image: ai-harness-minio:RELEASE.2025-04-22T22-12-26Z
+        build:
+            context: .
+            dockerfile: minio.Dockerfile
