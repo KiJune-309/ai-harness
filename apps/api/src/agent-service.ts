@@ -1,7 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import { agentCatalogSchema, agentInputSchema, type AgentCatalog, type AgentDefinition, type AgentInput } from '@ai-harness/contracts'
-import type { AgentStore, ChatScope } from '@ai-harness/db'
+import {
+    agentCatalogSchema,
+    agentInputSchema,
+    type AgentCatalog,
+    type AgentDefinition,
+    type AgentInput,
+    type SkillRef,
+    type SkillSnapshot,
+} from '@ai-harness/contracts'
+import type { AgentStore, ChatScope, SkillStore } from '@ai-harness/db'
 import { BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common'
+import type { AccountService } from './account-service.js'
+import { skillFailure } from './skill-service.js'
 
 /** Coordinates scoped agent definitions and validates executable server capabilities. */
 export class AgentService {
@@ -11,11 +21,15 @@ export class AgentService {
      * Retain initialized agent persistence and a credential-free capability catalog.
      * @param store - Agent persistence owned by the application's shared chat store.
      * @param catalog - Public models and tools supported by the initialized runtime.
+     * @param accounts - Private account coordinator for user-owned model routes.
+     * @param skills - Shared private exact-version skill resolver, omitted only by legacy test fixtures.
      * @throws Error when the server capability catalog is malformed.
      */
     constructor(
         private readonly store: AgentStore | undefined,
-        catalog: AgentCatalog
+        catalog: AgentCatalog,
+        private readonly accounts?: AccountService,
+        private readonly skills?: SkillStore
     ) {
         this.catalogDefinition = agentCatalogSchema.parse(catalog)
     }
@@ -29,13 +43,47 @@ export class AgentService {
     }
 
     /**
+     * Extend the server catalog with only this account's current model connections.
+     * @param scope - API-authenticated account and workspace.
+     * @returns A public catalog with no connection secrets.
+     */
+    async catalogFor(scope: ChatScope): Promise<AgentCatalog> {
+        const catalog = this.catalog()
+        if (!this.accounts) return catalog
+        let models: Awaited<ReturnType<AccountService['listModels']>>
+        try {
+            models = await this.accounts.listModels(scope)
+        } catch (error) {
+            return skillFailure(error)
+        }
+        return {
+            ...catalog,
+            defaultModelId: models.find(model => model.isDefault)?.modelId ?? catalog.defaultModelId,
+            models: [
+                ...models.map(model => ({
+                    id: model.modelId,
+                    label: model.name,
+                    provider: 'OpenAI 兼容',
+                    available: true,
+                    description: model.model,
+                })),
+                ...catalog.models,
+            ],
+        }
+    }
+
+    /**
      * List definitions owned by the authenticated user and workspace.
      * @param scope - Trusted ownership context established by the API guard.
      * @returns The caller's agent definitions sorted by recent update.
      * @throws ServiceUnavailableException when agent persistence is unavailable.
      */
-    list(scope: ChatScope): Promise<AgentDefinition[]> {
-        return this.agentStore().list(scope)
+    async list(scope: ChatScope): Promise<AgentDefinition[]> {
+        try {
+            return await this.agentStore().list(scope)
+        } catch (error) {
+            return skillFailure(error)
+        }
     }
 
     /**
@@ -47,9 +95,13 @@ export class AgentService {
      * @throws ServiceUnavailableException when agent persistence is unavailable.
      */
     async get(scope: ChatScope, id: string): Promise<AgentDefinition> {
-        const agent = await this.agentStore().get(scope, id)
-        if (!agent) throw new NotFoundException('未找到这个 Agent。')
-        return agent
+        try {
+            const agent = await this.agentStore().get(scope, id)
+            if (!agent) throw new NotFoundException('未找到这个 Agent。')
+            return agent
+        } catch (error) {
+            return skillFailure(error)
+        }
     }
 
     /**
@@ -61,10 +113,21 @@ export class AgentService {
      * @throws ServiceUnavailableException when agent persistence is unavailable.
      */
     async create(scope: ChatScope, input: AgentInput): Promise<AgentDefinition> {
-        const configuration = this.validate(input)
+        const { skillRefs, ...configuration } = await this.validate(input, scope)
+        const skillSnapshots = skillRefs?.length ? await this.resolveSkills(scope, skillRefs) : skillRefs ? [] : undefined
         const now = new Date().toISOString()
-        const agent: AgentDefinition = { ...configuration, id: randomUUID(), createdAt: now, updatedAt: now }
-        await this.agentStore().save(scope, agent)
+        const agent: AgentDefinition = {
+            ...configuration,
+            ...(skillSnapshots ? { skillSnapshots } : {}),
+            id: randomUUID(),
+            createdAt: now,
+            updatedAt: now,
+        }
+        try {
+            await this.agentStore().save(scope, agent)
+        } catch (error) {
+            return skillFailure(error)
+        }
         return agent
     }
 
@@ -80,27 +143,51 @@ export class AgentService {
      */
     async update(scope: ChatScope, id: string, input: AgentInput): Promise<AgentDefinition> {
         const previous = await this.get(scope, id)
-        const configuration = this.validate(input)
+        const { skillRefs, ...configuration } = await this.validate(input, scope)
+        const skillSnapshots =
+            skillRefs === undefined ? previous.skillSnapshots : skillRefs.length ? await this.resolveSkills(scope, skillRefs) : []
         const agent: AgentDefinition = {
             ...configuration,
+            ...(skillSnapshots ? { skillSnapshots } : {}),
             id: previous.id,
             createdAt: previous.createdAt,
             updatedAt: new Date().toISOString(),
         }
-        await this.agentStore().save(scope, agent)
+        try {
+            await this.agentStore().save(scope, agent)
+        } catch (error) {
+            return skillFailure(error)
+        }
         return agent
+    }
+
+    /**
+     * Resolves only explicit private exact versions into server-owned frozen Agent content.
+     * @param scope - Actual Agent owner and selected workspace.
+     * @param refs - Explicit unique ordered version references.
+     * @returns Complete ordered immutable snapshots without model execution.
+     * @throws ServiceUnavailableException when private skill persistence is unavailable.
+     */
+    private async resolveSkills(scope: ChatScope, refs: SkillRef[]): Promise<SkillSnapshot[]> {
+        try {
+            if (!this.skills) throw new ServiceUnavailableException('技能存储尚未连接，无法验证绑定。')
+            return await this.skills.resolve(scope, refs)
+        } catch (error) {
+            return skillFailure(error)
+        }
     }
 
     /**
      * Validate public configuration against the immutable server capability catalog.
      * @param input - Untrusted candidate agent configuration.
+     * @param scope - Authenticated account allowed to select its own model routes.
      * @returns A validated and detached agent configuration.
      * @throws BadRequestException when fields, model, or tools cannot be accepted.
      */
-    private validate(input: AgentInput): AgentInput {
+    private async validate(input: AgentInput, scope: ChatScope): Promise<AgentInput> {
         const parsed = agentInputSchema.safeParse(input)
         if (!parsed.success) throw new BadRequestException('Agent 配置格式不正确，请检查名称、模型和开场消息。')
-        const model = this.catalogDefinition.models.find(candidate => candidate.id === parsed.data.modelId)
+        const model = (await this.catalogFor(scope)).models.find(candidate => candidate.id === parsed.data.modelId)
         if (!model) throw new BadRequestException('所选模型不受支持。')
         const tools = new Set(this.catalogDefinition.tools.map(tool => tool.id))
         if (parsed.data.toolIds.some(id => !tools.has(id))) throw new BadRequestException('所选工具不受支持。')

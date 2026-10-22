@@ -2,20 +2,23 @@ import 'reflect-metadata'
 import { randomUUID } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { agentDefinitionSchema, type AgentCatalog, type AgentInput } from '@ai-harness/contracts'
-import { createChatStore, type ChatStore } from '@ai-harness/db'
+import { createMemoryChatStore, type ChatStore } from '@ai-harness/db'
 import { Module } from '@nestjs/common'
 import { NestFactory } from '@nestjs/core'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AccountService } from '../src/account-service.js'
 import { AgentController } from '../src/agent-controller.js'
 import { AgentService } from '../src/agent-service.js'
 import { ChatGuard } from '../src/auth.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
+import { sessionHeaders } from './session-fixture.js'
 
 const token = 'agent-tests-private-api-token-with-at-least-32-characters'
 const config = readApiConfig({ HARNESS_API_TOKEN: token, CHAT_STORE: 'memory' })
 const userId = randomUUID()
 const applications: NestExpressApplication[] = []
+let currentStore: ChatStore
 const stores: ChatStore[] = []
 const catalog: AgentCatalog = {
     defaultModelId: 'deepseek-chat',
@@ -47,17 +50,12 @@ function input(changes: Partial<AgentInput> = {}): AgentInput {
 }
 
 /**
- * Build authenticated server-to-server headers for an agent request.
+ * Persist a real fixture account session and construct private HTTP headers.
  * @param identity - Browser-session user UUID.
- * @returns Ownership claims accepted by the API authorization guard.
+ * @returns Opaque session and server headers checked by the API authorization guard.
  */
-function headers(identity = userId): Record<string, string> {
-    return {
-        authorization: `Bearer ${token}`,
-        'x-harness-user-id': identity,
-        'x-harness-workspace-id': config.workspaceId,
-        'content-type': 'application/json',
-    }
+async function headers(identity = userId): Promise<Record<string, string>> {
+    return sessionHeaders(currentStore, config, identity)
 }
 
 /**
@@ -67,7 +65,8 @@ function headers(identity = userId): Record<string, string> {
  * @throws Error when local application initialization or port binding fails.
  */
 async function start(capabilities = catalog): Promise<string> {
-    const store = await createChatStore({ allowMemory: true })
+    const store = await createMemoryChatStore()
+    currentStore = store
     stores.push(store)
     const service = new AgentService(store.agents, capabilities)
     class AgentTestModule {}
@@ -75,7 +74,7 @@ async function start(capabilities = catalog): Promise<string> {
     const application = await NestFactory.create<NestExpressApplication>(AgentTestModule, { logger: false })
     applications.push(application)
     application.setGlobalPrefix('api')
-    application.useGlobalGuards(new ChatGuard(config))
+    application.useGlobalGuards(new ChatGuard(config, new AccountService(store.accounts, config)))
     await application.listen(0, '127.0.0.1')
     const address = application.getHttpServer().address() as AddressInfo
     return `http://127.0.0.1:${address.port}/api/chat/agents`
@@ -86,11 +85,11 @@ async function start(capabilities = catalog): Promise<string> {
  * @param url - Agent collection or item endpoint.
  * @param body - Untrusted public JSON body.
  * @param method - Agent create or update operation.
- * @param identity - Authenticated browser-session identity.
+ * @param identity - Stable fixture user UUID whose real session is persisted.
  * @returns The raw HTTP response for assertions.
  */
-function save(url: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
-    return fetch(url, { method, headers: headers(identity), body: JSON.stringify(body) })
+async function save(url: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
+    return fetch(url, { method, headers: await headers(identity), body: JSON.stringify(body) })
 }
 
 afterEach(async () => {
@@ -104,7 +103,7 @@ describe('agent configuration HTTP API', () => {
         const base = await start()
         expect((await fetch(`${base}/catalog`)).status).toBe(401)
         expect((await fetch(base)).status).toBe(401)
-        const response = await fetch(`${base}/catalog`, { headers: headers() })
+        const response = await fetch(`${base}/catalog`, { headers: await headers() })
         expect(response.status).toBe(200)
         expect(await response.json()).toEqual(catalog)
     })
@@ -116,17 +115,18 @@ describe('agent configuration HTTP API', () => {
         const created = agentDefinitionSchema.parse(await response.json())
         expect(created).toMatchObject(input())
         expect(created.updatedAt).toBe(created.createdAt)
-        expect(await (await fetch(base, { headers: headers() })).json()).toEqual({ agents: [created] })
-        expect(await (await fetch(`${base}/${created.id}`, { headers: headers() })).json()).toEqual(created)
+        expect(await (await fetch(base, { headers: await headers() })).json()).toEqual({ agents: [created] })
+        expect(await (await fetch(`${base}/${created.id}`, { headers: await headers() })).json()).toEqual(created)
         const foreignUser = randomUUID()
-        expect(await (await fetch(base, { headers: headers(foreignUser) })).json()).toEqual({ agents: [] })
-        expect((await fetch(`${base}/${created.id}`, { headers: headers(foreignUser) })).status).toBe(404)
+        expect(await (await fetch(base, { headers: await headers(foreignUser) })).json()).toEqual({ agents: [] })
+        expect((await fetch(`${base}/${created.id}`, { headers: await headers(foreignUser) })).status).toBe(404)
         expect((await save(`${base}/${created.id}`, input({ name: 'Foreign update' }), 'PUT', foreignUser)).status).toBe(404)
-        expect(await (await fetch(`${base}/${created.id}`, { headers: headers() })).json()).toEqual(created)
+        expect(await (await fetch(`${base}/${created.id}`, { headers: await headers() })).json()).toEqual(created)
     })
 
     it('replaces configuration while preserving identity and creation time', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
+        currentStore = store
         stores.push(store)
         const service = new AgentService(store.agents, catalog)
         const scope = { userId, workspaceId: config.workspaceId }
@@ -162,10 +162,10 @@ describe('agent configuration HTTP API', () => {
         ]) {
             expect((await save(base, invalid)).status).toBe(400)
         }
-        expect(await (await fetch(base, { headers: headers() })).json()).toEqual({ agents: [] })
-        expect((await fetch(`${base}/not-a-uuid`, { headers: headers() })).status).toBe(400)
+        expect(await (await fetch(base, { headers: await headers() })).json()).toEqual({ agents: [] })
+        expect((await fetch(`${base}/not-a-uuid`, { headers: await headers() })).status).toBe(400)
         expect((await save(`${base}/not-a-uuid`, input(), 'PUT')).status).toBe(400)
-        expect((await fetch(`${base}/${randomUUID()}`, { headers: headers() })).status).toBe(404)
+        expect((await fetch(`${base}/${randomUUID()}`, { headers: await headers() })).status).toBe(404)
     })
 
     it('refuses schema-valid tools that are absent from the initialized runtime catalog', async () => {

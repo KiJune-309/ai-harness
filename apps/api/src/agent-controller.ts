@@ -26,11 +26,12 @@ export class AgentController {
 
     /**
      * Return public model and tool descriptors for the agent editor.
+     * @param request - Request with a validated account session.
      * @returns The server-supported capability catalog without credentials.
      */
     @Get('catalog')
-    catalog(): AgentCatalog {
-        return this.service.catalog()
+    catalog(@Req() request: ChatRequest): Promise<AgentCatalog> {
+        return this.service.catalogFor(request.chatScope)
     }
 
     /**
