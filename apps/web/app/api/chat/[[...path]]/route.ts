@@ -36,3 +36,13 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
 export async function PUT(request: Request, context: RouteContext): Promise<Response> {
     return proxyChatRequest(request, (await context.params).path ?? [])
 }
+
+/**
+ * Forwards a same-origin deletion of one authorized ordinary conversation.
+ * @param request - Browser mutation carrying the existing account session.
+ * @param context - Exact chat route parameters.
+ * @returns The API deletion receipt without exposing server credentials.
+ */
+export async function DELETE(request: Request, context: RouteContext): Promise<Response> {
+    return proxyChatRequest(request, (await context.params).path ?? [])
+}

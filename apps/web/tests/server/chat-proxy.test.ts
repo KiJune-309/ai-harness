@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { proxyChatRequest } from '../../server/chat-proxy'
 
 const token = 'local-bff-test-server-token-with-more-than-32-characters'
+const session = 's'.repeat(43)
+const accountCookie = `harness_account_session=${session}`
 
 /**
  * Create a same-origin browser request with optional untrusted headers.
@@ -14,19 +16,10 @@ const token = 'local-bff-test-server-token-with-more-than-32-characters'
 function browserRequest(method = 'GET', headers: Record<string, string> = {}, signal?: AbortSignal): Request {
     return new Request('https://harness.example/api/chat/conversations', {
         method,
-        headers: { origin: 'https://harness.example', ...headers },
+        headers: { cookie: accountCookie, origin: 'https://harness.example', ...headers },
         ...(method === 'POST' ? { body: '{}' } : {}),
         ...(signal ? { signal } : {}),
     })
-}
-
-/**
- * Extract only the signed cookie pair for a subsequent browser request.
- * @param response - BFF response that establishes its local session identity.
- * @returns The cookie name and signed identity without response attributes.
- */
-function cookiePair(response: Response): string {
-    return response.headers.get('set-cookie')!.split(';')[0]!
 }
 
 /**
@@ -39,9 +32,33 @@ function configuration(request: typeof fetch) {
 }
 
 describe('chat BFF authorization and streaming boundary', () => {
+    it('forwards only exact same-origin conversation deletion with the authenticated session', async () => {
+        const id = randomUUID()
+        const upstream = vi.fn<typeof fetch>(async () => Response.json({ id, deleted: true }))
+        const response = await proxyChatRequest(browserRequest('DELETE'), ['conversations', id], configuration(upstream))
+        expect(response.status).toBe(200)
+        await response.text()
+        expect(upstream.mock.calls[0]![1]).toMatchObject({ method: 'DELETE' })
+        expect(
+            (
+                await proxyChatRequest(
+                    browserRequest('DELETE', { origin: 'https://attacker.example' }),
+                    ['conversations', id],
+                    configuration(upstream)
+                )
+            ).status
+        ).toBe(403)
+        expect((await proxyChatRequest(browserRequest('DELETE'), ['tasks', id], configuration(upstream))).status).toBe(404)
+        expect((await proxyChatRequest(browserRequest('DELETE'), ['conversations'], configuration(upstream))).status).toBe(404)
+        expect(upstream).toHaveBeenCalledTimes(1)
+    })
     it('only forwards the approved task routes and preserves mutation bodies', async () => {
         const id = randomUUID()
         const cases: [string, string[]][] = [
+            ['GET', ['project-folders']],
+            ['GET', ['project-folders', id]],
+            ['POST', ['project-folders']],
+            ['POST', ['conversations', id, 'human-requests', id, 'decisions']],
             ['GET', ['tasks']],
             ['GET', ['tasks', id]],
             ['POST', ['tasks']],
@@ -54,7 +71,7 @@ describe('chat BFF authorization and streaming boundary', () => {
             const body = method === 'GET' ? undefined : JSON.stringify({ requestId: randomUUID() })
             const request = new Request(`https://harness.example/api/chat/${segments.join('/')}`, {
                 method,
-                headers: { origin: 'https://harness.example' },
+                headers: { cookie: accountCookie, origin: 'https://harness.example' },
                 ...(body ? { body } : {}),
             })
             const upstream = vi.fn<typeof fetch>(async () => Response.json({ ok: true }))
@@ -69,62 +86,55 @@ describe('chat BFF authorization and streaming boundary', () => {
             ['tasks', id, 'delete'],
             ['tasks', 'all'],
             ['tasks', id, 'private'],
+            ['conversations', id, 'human-requests', id, 'approve'],
+            ['conversations', id, 'human-requests', id, 'decisions', 'extra'],
         ])
             expect((await proxyChatRequest(browserRequest('POST'), segments, configuration(upstream))).status).toBe(404)
         expect(upstream).not.toHaveBeenCalled()
     })
 
-    it('overwrites forged browser identity and authorization headers with a signed server-established scope', async () => {
+    it('rejects old anonymous identities and missing account cookies without minting a replacement', async () => {
         const upstream = vi.fn<typeof fetch>(async () => Response.json({ conversations: [] }))
-        const forgedUser = randomUUID()
+        for (const cookie of ['', `harness_chat_session=${randomUUID()}.${'0'.repeat(64)}`, 'harness_account_session=forged']) {
+            const response = await proxyChatRequest(browserRequest('GET', { cookie }), ['conversations'], configuration(upstream))
+            expect(response.status).toBe(401)
+            expect(response.headers.get('set-cookie')).toBeNull()
+        }
+        expect(upstream).not.toHaveBeenCalled()
+    })
+
+    it('forwards only the opaque account session and server token while stripping browser identity claims', async () => {
+        const upstream = vi.fn<typeof fetch>(async () => Response.json({ conversations: [] }))
         const response = await proxyChatRequest(
             browserRequest('GET', {
                 authorization: 'Bearer browser-controlled',
-                'x-harness-user-id': forgedUser,
-                'x-harness-workspace-id': 'forged-workspace',
-                cookie: `harness_chat_session=${forgedUser}.${'0'.repeat(64)}`,
+                'x-harness-user-id': randomUUID(),
+                'x-harness-workspace-id': 'forged',
+                'x-harness-session': 'browser-header',
             }),
             ['conversations'],
             configuration(upstream)
         )
         expect(response.status).toBe(200)
-        expect(upstream).toHaveBeenCalledOnce()
-        const [url, init] = upstream.mock.calls[0]!
-        const headers = new Headers(init!.headers)
-        expect(String(url)).toBe('http://private-api.example:3001/api/chat/conversations')
+        const headers = new Headers(upstream.mock.calls[0]![1]!.headers)
         expect(headers.get('authorization')).toBe(`Bearer ${token}`)
-        expect(headers.get('x-harness-user-id')).not.toBe(forgedUser)
-        expect(headers.get('x-harness-workspace-id')).toBe('trusted-workspace')
-        expect(init).toMatchObject({ cache: 'no-store', redirect: 'error' })
-        expect(response.headers.get('set-cookie')).toContain('; HttpOnly; SameSite=Strict; Path=/;')
-        expect(response.headers.get('set-cookie')).toContain('; Secure')
-        expect(response.headers.get('set-cookie')).not.toContain(token)
+        expect(headers.get('x-harness-session')).toBe(session)
+        expect(headers.has('x-harness-user-id')).toBe(false)
+        expect(headers.has('x-harness-workspace-id')).toBe(false)
+        expect(response.headers.get('set-cookie')).toBeNull()
         expect(await response.json()).toEqual({ conversations: [] })
     })
 
-    it('reuses valid signed cookies but mints a fresh identity after either cookie component changes', async () => {
-        const identities: (string | null)[] = []
-        const upstream: typeof fetch = async (_url, init) => {
-            identities.push(new Headers(init!.headers).get('x-harness-user-id'))
-            return Response.json({ conversations: [] })
-        }
-        const first = await proxyChatRequest(browserRequest(), ['conversations'], configuration(upstream))
-        const original = cookiePair(first)
-        await first.text()
-        const reused = await proxyChatRequest(browserRequest('GET', { cookie: original }), ['conversations'], configuration(upstream))
-        expect(cookiePair(reused)).toBe(original)
-        await reused.text()
-        for (const modified of [
-            original.replace(/=[^.]+/, `=${randomUUID()}`),
-            original.slice(0, -1) + (original.endsWith('0') ? '1' : '0'),
-        ]) {
-            const response = await proxyChatRequest(browserRequest('GET', { cookie: modified }), ['conversations'], configuration(upstream))
-            expect(cookiePair(response)).not.toBe(original)
-            await response.text()
-        }
-        expect(identities[1]).toBe(identities[0])
-        expect(identities[2]).not.toBe(identities[0])
-        expect(identities[3]).not.toBe(identities[0])
+    it('clears an expired account cookie after the real API rejects its session', async () => {
+        const response = await proxyChatRequest(
+            browserRequest(),
+            ['conversations'],
+            configuration(async () => Response.json({ message: 'expired' }, { status: 401 }))
+        )
+        expect(response.status).toBe(401)
+        expect(response.headers.get('set-cookie')).toContain('Max-Age=0')
+        expect(response.headers.get('set-cookie')).toContain('HttpOnly; SameSite=Strict')
+        expect(response.headers.get('set-cookie')).toContain('Secure')
     })
 
     it('refuses cross-origin mutations, unsupported paths, and oversized bodies before contacting the API', async () => {
@@ -152,7 +162,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         const upstream = vi.fn<typeof fetch>(async () => Response.json({ id: randomUUID() }))
         const sameOrigin = new Request('http://localhost:3000/api/chat/conversations', {
             method: 'POST',
-            headers: { host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' },
+            headers: { cookie: accountCookie, host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' },
             body: '{}',
         })
         const allowed = await proxyChatRequest(sameOrigin, ['conversations'], configuration(upstream))
@@ -162,7 +172,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         for (const origin of ['http://localhost:3000', 'http://127.0.0.1:3001', 'https://attacker.example']) {
             const crossOrigin = new Request('http://localhost:3000/api/chat/conversations', {
                 method: 'POST',
-                headers: { host: '127.0.0.1:3000', origin },
+                headers: { cookie: accountCookie, host: '127.0.0.1:3000', origin },
                 body: '{}',
             })
             const denied = await proxyChatRequest(crossOrigin, ['conversations'], configuration(upstream))
@@ -177,7 +187,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         const upstream = vi.fn<typeof fetch>(async () => Response.json({ id }))
         const request = new Request(`https://harness.example/api/chat/agents/${id}`, {
             method: 'PUT',
-            headers: { origin: 'https://harness.example', 'content-type': 'application/json' },
+            headers: { cookie: accountCookie, origin: 'https://harness.example', 'content-type': 'application/json' },
             body,
         })
         const response = await proxyChatRequest(request, ['agents', id], configuration(upstream))
@@ -187,7 +197,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         expect(upstream.mock.calls[0]?.[1]).toMatchObject({ method: 'PUT', body })
         const foreign = new Request(request.url, {
             method: 'PUT',
-            headers: { origin: 'https://attacker.example' },
+            headers: { cookie: accountCookie, origin: 'https://attacker.example' },
             body,
         })
         expect((await proxyChatRequest(foreign, ['agents', id], configuration(upstream))).status).toBe(403)
@@ -213,7 +223,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         expect(response.headers.get('cache-control')).toBe('no-store, no-transform')
         expect(response.headers.get('x-accel-buffering')).toBe('no')
         expect(response.headers.get('x-private-secret')).toBeNull()
-        expect(response.headers.get('set-cookie')).not.toContain('upstream-private')
+        expect(response.headers.get('set-cookie')).toBeNull()
         expect(await response.text()).toBe(payload)
     })
 
@@ -296,7 +306,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         for (const [method, segments] of routes) {
             const request = new Request(`https://harness.example/api/chat/${segments.join('/')}`, {
                 method,
-                headers: { origin: 'https://harness.example' },
+                headers: { cookie: accountCookie, origin: 'https://harness.example' },
                 ...(method === 'GET' ? {} : { body: '{"projectId":null}' }),
             })
             const response = await proxyChatRequest(request, segments, configuration(upstream))
@@ -306,7 +316,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         expect(upstream).toHaveBeenCalledTimes(routes.length)
         const denied = new Request(`https://harness.example/api/chat/projects/${id}`, {
             method: 'PUT',
-            headers: { origin: 'https://attacker.example' },
+            headers: { cookie: accountCookie, origin: 'https://attacker.example' },
             body: '{}',
         })
         expect((await proxyChatRequest(denied, ['projects', id], configuration(upstream))).status).toBe(403)
@@ -334,7 +344,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         for (const [method, segments] of routes) {
             const request = new Request(`https://harness.example/api/chat/${segments.join('/')}`, {
                 method,
-                headers: { origin: 'https://harness.example' },
+                headers: { cookie: accountCookie, origin: 'https://harness.example' },
                 ...(method === 'GET' ? {} : { body: '{}' }),
             })
             const response = await proxyChatRequest(request, segments, configuration(upstream))
@@ -343,7 +353,7 @@ describe('chat BFF authorization and streaming boundary', () => {
         }
         const foreign = new Request('https://harness.example/api/chat/templates', {
             method: 'POST',
-            headers: { origin: 'https://attacker.example' },
+            headers: { cookie: accountCookie, origin: 'https://attacker.example' },
             body: '{}',
         })
         expect((await proxyChatRequest(foreign, ['templates'], configuration(upstream))).status).toBe(403)

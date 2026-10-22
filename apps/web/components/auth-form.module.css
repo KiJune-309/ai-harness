@@ -1,0 +1,252 @@
+/* Public authentication keeps its form neutral beside the independently styled brand poster. */
+
+.page {
+    --auth-paper: var(--background);
+    --auth-ink: var(--foreground);
+    --auth-muted: var(--muted-foreground);
+    --auth-line: var(--border);
+    --auth-ease: var(--motion-ease);
+
+    display: grid;
+    grid-template-columns: minmax(0, 1.58fr) minmax(0, 1fr);
+    min-height: 100dvh;
+    background: var(--auth-paper);
+    color: var(--auth-ink);
+    font-family: var(--font-ui);
+}
+
+.access {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    padding: 40px clamp(24px, 4.4vw, 72px);
+    background: var(--auth-paper);
+}
+
+.accessInner {
+    width: 100%;
+    max-width: 380px;
+    margin: auto;
+}
+
+.kicker {
+    margin: 0;
+    font-family: var(--font-ui);
+    font-size: 12px;
+    line-height: 1.5;
+    letter-spacing: 0.06em;
+    color: var(--auth-muted);
+    text-wrap: pretty;
+    animation: fade-up var(--motion-normal) var(--auth-ease) 0ms backwards;
+}
+
+.kicker[data-state='expired'] {
+    color: var(--warning-foreground);
+}
+
+.kicker[data-state='updated'] {
+    color: var(--auth-ink);
+}
+
+.kickerRule {
+    height: 1px;
+    margin-top: 13px;
+    background: var(--auth-line);
+    transform-origin: left;
+    animation: rule-draw var(--motion-normal) var(--auth-ease) 40ms backwards;
+}
+
+.title {
+    margin: 0;
+    font-family: var(--font-ui);
+    font-size: var(--type-title);
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    animation: fade-up var(--motion-normal) var(--auth-ease) 30ms backwards;
+}
+
+.kickerRule + .title {
+    margin-top: clamp(16px, 2.4vh, 24px);
+}
+
+.lede {
+    margin: 8px 0 0;
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--auth-muted);
+    animation: fade-up var(--motion-normal) var(--auth-ease) 60ms backwards;
+}
+
+.form {
+    display: grid;
+    margin: 24px 0 0;
+}
+
+.fields {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.field {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    animation: fade-up var(--motion-normal) var(--auth-ease) 60ms backwards;
+}
+
+.field:nth-child(1) {
+    animation-delay: 80ms;
+}
+
+.field:nth-child(2) {
+    animation-delay: 120ms;
+}
+
+.field:nth-child(3) {
+    animation-delay: 120ms;
+}
+
+.field:nth-child(4) {
+    animation-delay: 120ms;
+}
+
+.fieldMessage {
+    font-size: 12px;
+    line-height: 20px;
+    color: var(--muted-foreground);
+}
+
+.fieldMessage[data-kind='error'] {
+    font-size: 13px;
+    color: var(--error-foreground);
+}
+
+.formStatus {
+    margin: 12px 0 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--error-foreground);
+    text-wrap: pretty;
+}
+
+.submit {
+    width: 100%;
+    margin-top: 20px;
+    animation: fade-up var(--motion-normal) var(--auth-ease) 150ms backwards;
+}
+
+.switch {
+    margin: 16px 0 0;
+    font-size: 13px;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+    color: var(--muted-foreground);
+    animation: fade-up var(--motion-normal) var(--auth-ease) 190ms backwards;
+}
+
+.switchLink {
+    padding-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+    color: var(--auth-ink);
+    text-decoration: none;
+    transition: border-color var(--motion-fast) var(--auth-ease);
+}
+
+.switchLink:hover {
+    border-bottom-color: var(--auth-ink);
+}
+
+.switchLink:focus-visible {
+    outline: 1px solid var(--auth-ink);
+    outline-offset: 3px;
+}
+
+.switchLinkDisabled {
+    padding-bottom: 2px;
+    border-bottom: 1px solid var(--auth-line);
+    color: var(--auth-muted);
+    cursor: progress;
+}
+
+@keyframes fade-up {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+}
+
+@keyframes rule-draw {
+    from {
+        transform: scaleX(0);
+    }
+}
+
+@media (max-width: 1023px) {
+    .page {
+        grid-template-columns: minmax(0, 1fr);
+        align-content: start;
+    }
+
+    .access {
+        padding: 24px 20px calc(26px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--auth-line);
+    }
+
+    .accessInner {
+        margin: 0 auto;
+        max-width: 440px;
+    }
+
+    .title {
+        font-size: var(--type-title);
+    }
+}
+
+@media (max-width: 639px) {
+    .access {
+        padding: 18px 18px calc(24px + env(safe-area-inset-bottom));
+    }
+
+    .kickerRule + .title {
+        margin-top: 12px;
+    }
+
+    .kickerRule {
+        margin-top: 10px;
+    }
+
+    .title {
+        font-size: 22px;
+    }
+
+    .lede {
+        margin-top: 8px;
+        font-size: 13px;
+    }
+
+    .form {
+        margin-top: 16px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .kicker,
+    .kickerRule,
+    .title,
+    .lede,
+    .field,
+    .submit,
+    .switch {
+        animation: none;
+    }
+
+    .switchLink {
+        transition: none;
+    }
+}
