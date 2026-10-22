@@ -1,9 +1,9 @@
-import { ProjectWorkspace } from '../../components/project-workspace'
+import { notFound } from 'next/navigation'
 
 /**
- * Opens the personal project collection within the shared workspace.
- * @returns Real projects and their creation flow.
+ * Rejects the removed legacy project collection route.
+ * @returns Nothing because the route is no longer available.
  */
 export default function ProjectsPage() {
-    return <ProjectWorkspace />
+    notFound()
 }

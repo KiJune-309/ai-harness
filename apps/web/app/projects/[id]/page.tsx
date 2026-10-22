@@ -1,11 +1,9 @@
-import { ProjectWorkspace } from '../../../components/project-workspace'
+import { notFound } from 'next/navigation'
 
 /**
- * Opens a project at its stable address without creating or executing tasks.
- * @param props - Project identifier supplied by the application route.
- * @returns Saved project information and every associated personal task.
+ * Rejects removed legacy project links without resolving unrelated conversations.
+ * @returns Nothing because legacy project details are no longer available.
  */
-export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params
-    return <ProjectWorkspace projectId={id} />
+export default function ProjectPage() {
+    notFound()
 }
