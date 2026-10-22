@@ -1,7 +1,31 @@
-import type { ChatConversation, ChatStatus, ChatStreamEvent } from '@ai-harness/contracts'
-import { chatConversationSchema, chatStatusSchema, chatStreamEventSchema } from '@ai-harness/contracts'
+import { observeWorkspaceResponse, workspaceHeaders } from './workspace-context'
+import type {
+    ChatConversation,
+    ChatStatus,
+    ChatStreamEvent,
+    HumanDecisionAction,
+    HumanResponse,
+    PersonMention,
+} from '@ai-harness/contracts'
+import { chatConversationSchema, chatStatusSchema, chatStreamEventSchema, deleteConversationResultSchema } from '@ai-harness/contracts'
 
 const chatPath = '/api/chat'
+
+export class ChatRequestError extends Error {
+    /**
+     * Retains the HTTP status needed to reconcile a stale human response safely.
+     * @param message - Public service failure text.
+     * @param status - Rejected HTTP status.
+     * @returns A chat request error with its original status.
+     */
+    constructor(
+        message: string,
+        readonly status: number
+    ) {
+        super(message)
+        this.name = 'ChatRequestError'
+    }
+}
 
 /**
  * Validates public API data before it enters the workspace state.
@@ -26,12 +50,12 @@ async function responseError(response: Response): Promise<Error> {
         const body: unknown = await response.json()
         if (body && typeof body === 'object' && 'message' in body) {
             const message = body.message
-            if (typeof message === 'string' && message.trim()) return new Error(message)
+            if (typeof message === 'string' && message.trim()) return new ChatRequestError(message, response.status)
         }
     } catch {
         // A proxy or disconnected server may return a non-JSON error page.
     }
-    return new Error(`聊天服务请求失败（${response.status}），请稍后重试。`)
+    return new ChatRequestError(`聊天服务请求失败（${response.status}），请稍后重试。`, response.status)
 }
 
 /**
@@ -58,11 +82,15 @@ export async function requestChatResponse(path: string, options: RequestInit = {
     const deadline = new AbortController()
     const timer = setTimeout(() => deadline.abort(), 15_000)
     try {
-        return await fetch(`${chatPath}${path}`, {
+        const response = await fetch(`${chatPath}${path}`, {
             cache: 'no-store',
             ...options,
+            headers: workspaceHeaders(options.headers),
             signal: options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal,
         })
+        observeWorkspaceResponse(response)
+        if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event('harness:unauthorized'))
+        return response
     } catch (error) {
         if (options.signal?.aborted) throw error
         if (deadline.signal.aborted) throw new Error('连接超时，请检查网络后重试。')
@@ -99,14 +127,20 @@ export async function listConversations(signal?: AbortSignal): Promise<ChatConve
  * @param title - Initial title derived from the user's first message.
  * @param signal - Optional cancellation signal for the request.
  * @param agentId - Optional saved Agent chosen for this conversation.
+ * @param project - Optional personal project and retained creation action for a new conversation.
  * @returns The newly persisted empty conversation.
  * @throws Error when creation fails.
  */
-export async function createConversation(title: string, signal?: AbortSignal, agentId?: string): Promise<ChatConversation> {
+export async function createConversation(
+    title: string,
+    signal?: AbortSignal,
+    agentId?: string,
+    project?: { projectFolderId?: string; requestId?: string }
+): Promise<ChatConversation> {
     const result = await requestJson('/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, ...(agentId ? { agentId } : {}) }),
+        body: JSON.stringify({ title, ...(agentId ? { agentId } : {}), ...project }),
         signal,
     })
     return parseResponse(result, chatConversationSchema)
@@ -124,6 +158,20 @@ export async function getConversation(id: string, signal?: AbortSignal): Promise
 }
 
 /**
+ * Deletes one owned ordinary chat through the authorized same-origin proxy.
+ * @param id - Exact conversation selected by the user.
+ * @returns After the server confirms durable deletion of this identity.
+ * @throws Error when deletion fails or the receipt does not match the chosen conversation.
+ */
+export async function deleteConversation(id: string): Promise<void> {
+    const result = parseResponse(
+        await requestJson(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+        deleteConversationResultSchema
+    )
+    if (result.id !== id) throw new Error('未能确认对话删除结果，请刷新后重试。')
+}
+
+/**
  * Cancels a running turn and waits for its partial answer to be saved.
  * @param id - Conversation containing the running request.
  * @param requestId - Identifier of the request the user chose to stop.
@@ -136,6 +184,26 @@ export async function cancelConversation(id: string, requestId: string): Promise
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requestId }),
     })
+    return parseResponse(result, chatConversationSchema)
+}
+
+/**
+ * Records one dedicated decision about the exact saved human request version.
+ * @param conversationId - Owned ordinary conversation containing the request.
+ * @param humanRequestId - Stable identity of the reviewed request.
+ * @param action - Retained idempotency identity, exact version, and human decision.
+ * @returns The durable conversation after the decision and any resume scheduling.
+ * @throws ChatRequestError when permission, version, or current state rejects the action.
+ */
+export async function decideHumanRequest(
+    conversationId: string,
+    humanRequestId: string,
+    action: HumanDecisionAction
+): Promise<ChatConversation> {
+    const result = await requestJson(
+        `/conversations/${encodeURIComponent(conversationId)}/human-requests/${encodeURIComponent(humanRequestId)}/decisions`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action) }
+    )
     return parseResponse(result, chatConversationSchema)
 }
 
@@ -162,6 +230,8 @@ function decodeFrame(frame: string): ChatStreamEvent | null {
  * @param requestId - Stable identifier for this user turn and any explicit retry.
  * @param onEvent - Receives parsed model, completion, and failure events.
  * @param signal - Aborting this signal disconnects and cancels server generation.
+ * @param mentions - Explicit account bindings relative to the submitted message body.
+ * @param humanResponse - Exact saved question answered by this ordinary composer submission.
  * @returns A promise resolved after a terminal server event.
  * @throws Error for HTTP failures, malformed events, or truncated connections.
  */
@@ -170,9 +240,16 @@ export async function streamMessage(
     content: string,
     requestId: string,
     onEvent: (event: ChatStreamEvent) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    mentions?: PersonMention[],
+    humanResponse?: HumanResponse
 ): Promise<void> {
-    await streamChatRequest(`/conversations/${encodeURIComponent(conversationId)}/messages`, { content, requestId }, onEvent, signal)
+    await streamChatRequest(
+        `/conversations/${encodeURIComponent(conversationId)}/messages`,
+        { content, requestId, ...(mentions?.length ? { mentions } : {}), ...(humanResponse ? { humanResponse } : {}) },
+        onEvent,
+        signal
+    )
 }
 
 /**
@@ -186,7 +263,7 @@ export async function streamMessage(
  */
 export async function streamChatRequest(
     path: string,
-    body: Record<string, string>,
+    body: Record<string, unknown>,
     onEvent: (event: ChatStreamEvent) => void,
     signal: AbortSignal
 ): Promise<void> {

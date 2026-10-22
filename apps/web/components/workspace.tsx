@@ -4,31 +4,36 @@ import {
     ArrowRight,
     ArrowUp,
     Bot,
-    Check,
     ChevronDown,
     ChevronRight,
     CircleHelp,
     Copy,
+    Files,
     Folder,
-    Grid2X2,
-    Home,
     Inbox,
     Layers,
-    MoreHorizontal,
+    BookOpen,
     MessageSquare,
-    Menu,
-    Paperclip,
-    Plus,
     SlidersHorizontal,
     Square,
     SquarePen,
-    X,
 } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import type { AgentDefinition, ChatConversation, ChatMessage, ChatStatus, ChatStreamEvent } from '@ai-harness/contracts'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, useTransition, type ReactNode } from 'react'
+import type {
+    AgentDefinition,
+    ChatConversation,
+    ChatMessage,
+    ChatStatus,
+    ChatStreamEvent,
+    HumanRequest,
+    HumanResponse,
+    PersonMention,
+    ProjectFolder,
+} from '@ai-harness/contracts'
 import { getAgent, listAgents } from '../lib/agent-client'
+import { useAccount } from './account-context'
 import {
     cancelConversation,
     createConversation,
@@ -39,10 +44,52 @@ import {
 } from '../lib/chat-client'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { UserMenu } from './user-menu'
+import { WorkspaceNavigationContent, WorkspaceNavigationLabel } from './workspace-navigation'
+import { WorkspaceSelector } from './team-workspaces'
+import { FeedbackMessage, FeedbackToast } from './ui/feedback-message'
+import { Badge } from './ui/badge'
+import { Button } from './ui/button'
+import { Card, CardContent } from './ui/card'
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from './ui/collapsible'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from './ui/dropdown-menu'
+import { Label } from './ui/label'
+import { NativeSelect, NativeSelectOption } from './ui/native-select'
+import { MessageComposer, trimPersonMentions } from './message-composer'
+import { ProjectFolders } from './project-folders'
+import { ProjectFiles } from './project-files'
+import { HumanRequestPanel } from './human-request-panel'
+import { ConversationHistoryItem } from './conversation-history-item'
+import { CollaborationSourcePanel } from './collaboration-workspace'
+import {
+    Sidebar,
+    SidebarProvider,
+    SidebarHeader,
+    SidebarContent,
+    SidebarFooter,
+    SidebarGroup,
+    SidebarGroupContent,
+    SidebarMenu,
+    SidebarMenuItem,
+    SidebarMenuButton,
+    SidebarSeparator,
+    SidebarInset,
+    SidebarTrigger,
+    useSidebar,
+} from './ui/sidebar'
 
 type Conversation = ChatConversation & { unread?: boolean }
 type Generation = { conversationId: string | null; requestId: string; stopping?: boolean }
-type RetryTurn = { conversationId: string | null; content: string; requestId: string }
+type RetryTurn = {
+    conversationId: string | null
+    content: string
+    requestId: string
+    mentions?: PersonMention[]
+    projectFolderId?: string
+    agentId?: string
+    humanResponse?: HumanResponse
+}
 type ModalKind = 'workspace' | 'files' | 'plugins' | 'settings' | 'help' | 'starters' | 'more' | 'history'
 
 const activeConversationKey = 'ai-harness.active-conversation'
@@ -83,6 +130,16 @@ function OrbitMark({ className = '' }: { className?: string }) {
  */
 function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : '聊天服务暂时无法连接，请重试。'
+}
+
+/**
+ * Orders saved conversations by their latest update with a stable tie-breaker.
+ * @param left - First saved conversation to compare.
+ * @param right - Second saved conversation to compare.
+ * @returns A sort comparison placing the most recently updated conversation first.
+ */
+function compareConversationUpdates(left: Conversation, right: Conversation) {
+    return Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || left.id.localeCompare(right.id)
 }
 
 /**
@@ -130,23 +187,38 @@ function getServerDocumentVisibility() {
  * @param props - Route content displayed beside the shared conversation interface.
  * @returns The responsive workspace, dialogs, and live chat controls.
  */
-export function Workspace({ children }: { children: ReactNode }) {
+function WorkspaceContent({ children }: { children: ReactNode }) {
+    const { modelLabel, user } = useAccount()
     const pathname = usePathname()
     const router = useRouter()
-    const requestedAgentId = useSearchParams().get('agent')
+    const { isMobile, setOpenMobile } = useSidebar()
+    const searchParams = useSearchParams()
+    const requestedAgentId = searchParams.get('agent')
+    const requestedConversationId = searchParams.get('conversation')
+    const requestedEventId = searchParams.get('event') ?? undefined
     const isHome = pathname === '/'
     const isTasks = pathname === '/inbox' || pathname.startsWith('/inbox/')
-    const isProjects = pathname === '/projects' || pathname.startsWith('/projects/')
     const isTemplates = pathname === '/templates' || pathname.startsWith('/templates/')
     const [conversations, setConversations] = useState<Conversation[]>([])
     const [activeId, setActiveId] = useState<string | null>(null)
+    const [startingConversation, startConversationTransition] = useTransition()
     const [draft, setDraft] = useState('')
-    const [historyExpanded, setHistoryExpanded] = useState(false)
+    const [draftMentions, setDraftMentions] = useState<PersonMention[]>([])
+    const [answerTarget, setAnswerTarget] = useState<(HumanResponse & { conversationId: string }) | null>(null)
+    const [conversationRoute, setConversationRoute] = useState<{ id: string | null; ready: boolean }>({
+        id: requestedConversationId,
+        ready: !requestedConversationId,
+    })
+    const [historyExpanded, setHistoryExpanded] = useState(true)
+    const [projectFolders, setProjectFolders] = useState<ProjectFolder[]>([])
+    const [selectedProjectFolderId, setSelectedProjectFolderId] = useState<string | undefined>()
+    const [projectFilesOpen, setProjectFilesOpen] = useState(false)
     const [recentIds, setRecentIds] = useState<string[]>([])
     const [loadingHistory, setLoadingHistory] = useState(true)
     const [reloadVersion, setReloadVersion] = useState(0)
     const [chatStatus, setChatStatus] = useState<ChatStatus | null>(null)
     const [chatError, setChatError] = useState('')
+    const [historySyncError, setHistorySyncError] = useState('')
     const [retryTurn, setRetryTurn] = useState<RetryTurn | null>(null)
     const [generation, setGeneration] = useState<Generation | null>(null)
     const [agents, setAgents] = useState<AgentDefinition[]>([])
@@ -158,41 +230,85 @@ export function Workspace({ children }: { children: ReactNode }) {
     })
     const [modalKind, setModalKind] = useState<ModalKind>('workspace')
     const [notice, setNotice] = useState('')
+    const [modalOpen, setModalOpen] = useState(false)
     const generationController = useRef<AbortController | null>(null)
     const cancellation = useRef<{ requestId: string; promise: Promise<ChatConversation> } | null>(null)
     const visibleConversation = useRef({ isHome, activeId })
     const selectionRequest = useRef(0)
-    const modalRef = useRef<HTMLDialogElement>(null)
-    const drawerRef = useRef<HTMLDialogElement>(null)
+    const deletedConversationIds = useRef(new Set<string>())
     const inputRef = useRef<HTMLTextAreaElement>(null)
+    const mobileProjectFilesRef = useRef<HTMLButtonElement>(null)
+    const desktopProjectFilesRef = useRef<HTMLButtonElement>(null)
     const endRef = useRef<HTMLDivElement>(null)
+    const messageAnchors = useRef(new Map<string, HTMLDivElement>())
     const documentVisible = useSyncExternalStore(subscribeDocumentVisibility, getDocumentVisibility, getServerDocumentVisibility)
     const activeConversation = conversations.find(item => item.id === activeId)
+    const pendingQuestion = activeConversation?.humanRequests?.find(request => request.kind === 'question' && request.status === 'pending')
+    const backgroundRequestId = activeConversation?.activeRequestId
+    const executionBusy = Boolean(generation || backgroundRequestId)
+    const answerTargetCurrent = Boolean(
+        pendingQuestion &&
+        answerTarget?.conversationId === activeId &&
+        answerTarget.requestId === pendingQuestion.id &&
+        answerTarget.version === pendingQuestion.version
+    )
+    const staleAnswer = Boolean((pendingQuestion || answerTarget) && !answerTargetCurrent && draft.trim())
+    const projectFolderId = activeConversation?.projectFolderId ?? (activeId ? undefined : selectedProjectFolderId)
+    const projectName = projectFolders.find(item => item.id === projectFolderId)?.name ?? '当前项目'
+    const orderedConversations = [...conversations].sort(compareConversationUpdates)
     const selectedAgent = agents.find(item => item.id === selectedAgentId)
+    const composerAgentName = agents.find(item => item.id === (activeConversation?.agentId ?? selectedAgentId))?.name ?? '通用助手'
     const resolvingAgent =
-        isHome && Boolean(requestedAgentId && (agentRoute.key !== agentRouteKey || agentRoute.resolvedId !== requestedAgentId))
-    const agent = resolvingAgent ? '正在载入 Agent…' : (activeConversation?.agent?.name ?? selectedAgent?.name ?? '通用助手')
-    const model = activeConversation?.agent?.modelId ?? selectedAgent?.modelId ?? chatStatus?.model ?? 'DeepSeek'
-    const shownConversation = resolvingAgent
-        ? undefined
-        : (activeConversation ??
-          (selectedAgent
-              ? {
-                    title: selectedAgent.name,
-                    messages: selectedAgent.openingMessages.map((content, index): ChatMessage => ({
-                        id: `opening-${selectedAgent.id}-${index}`,
-                        role: 'assistant',
-                        content,
-                        status: 'complete',
-                        kind: 'opening',
-                        createdAt: selectedAgent.updatedAt,
-                    })),
-                }
-              : undefined))
+        isHome &&
+        !requestedConversationId &&
+        Boolean(requestedAgentId && (agentRoute.key !== agentRouteKey || agentRoute.resolvedId !== requestedAgentId))
+    const resolvingConversation =
+        isHome && Boolean(requestedConversationId && (conversationRoute.id !== requestedConversationId || !conversationRoute.ready))
+    const model = modelLabel(activeConversation?.agent?.modelId ?? selectedAgent?.modelId ?? chatStatus?.model ?? 'DeepSeek')
+    const shownConversation =
+        resolvingAgent || resolvingConversation
+            ? undefined
+            : (activeConversation ??
+              (selectedAgent
+                  ? {
+                        title: selectedAgent.name,
+                        messages: selectedAgent.openingMessages.map((content, index): ChatMessage => ({
+                            id: `opening-${selectedAgent.id}-${index}`,
+                            role: 'assistant',
+                            content,
+                            status: 'complete',
+                            kind: 'opening',
+                            createdAt: selectedAgent.updatedAt,
+                        })),
+                    }
+                  : undefined))
     const hasMessages = Boolean(shownConversation?.messages.length)
+    const displayedMessages =
+        shownConversation?.messages.filter(
+            message =>
+                !(
+                    message.role === 'assistant' &&
+                    message.status === 'complete' &&
+                    !message.content &&
+                    !message.reasoning &&
+                    !(generation?.conversationId === activeId && generation.requestId === message.requestId) &&
+                    (!backgroundRequestId || backgroundRequestId !== message.requestId)
+                )
+        ) ?? []
+
+    /**
+     * Finds the visible historical slot immediately after one exact message.
+     * @param messageId - Stable saved message identity selected for a collaboration receipt.
+     * @returns The current chat-owned anchor, or null when that message is not mounted.
+     */
+    const getMessageAnchor = useCallback((messageId: string): HTMLDivElement | null => {
+        return messageAnchors.current.get(messageId) ?? null
+    }, [])
 
     // Navigation invalidates the previous deep-link resolution before a message can be sent.
     if (agentRoute.key !== agentRouteKey) setAgentRoute({ key: agentRouteKey, resolvedId: null })
+    if (conversationRoute.id !== requestedConversationId)
+        setConversationRoute({ id: requestedConversationId, ready: !requestedConversationId })
 
     // 可见会话在渲染时标为已读，避免展示过期的未读提示。
     if (isHome && documentVisible && activeConversation?.unread) {
@@ -205,6 +321,7 @@ export function Workspace({ children }: { children: ReactNode }) {
      * @returns Nothing; updates history and recent-conversation ordering.
      */
     function updateConversation(conversation: ChatConversation) {
+        if (deletedConversationIds.current.has(conversation.id)) return
         const view = visibleConversation.current
         const unread = !(view.isHome && view.activeId === conversation.id && document.visibilityState === 'visible')
         setConversations(items => [{ ...conversation, unread }, ...items.filter(item => item.id !== conversation.id)])
@@ -250,22 +367,28 @@ export function Workspace({ children }: { children: ReactNode }) {
     }, [isHome, activeId])
 
     useEffect(() => {
-        if (!isHome) return
         const controller = new AbortController()
-        // The first response establishes the browser identity before history is requested.
-        getChatStatus(controller.signal)
-            .then(async status => {
-                const [items, savedAgents] = await Promise.all([listConversations(controller.signal), listAgents(controller.signal)])
+        // All routes share saved chat history; only the chat page needs model and Agent metadata.
+        const metadata = isHome ? Promise.all([getChatStatus(controller.signal), listAgents(controller.signal)]) : Promise.resolve(null)
+        Promise.all([listConversations(controller.signal), metadata])
+            .then(([history, details]) => {
                 if (controller.signal.aborted) return
-                setChatStatus(status)
-                setConversations(current => (generationController.current ? current : items))
-                setAgents(savedAgents)
+                const items = history.filter(item => !deletedConversationIds.current.has(item.id))
+                if (details) setChatStatus(details[0])
+                setConversations(current => {
+                    if (generationController.current) return current
+                    const selected = requestedConversationId ? current.find(item => item.id === requestedConversationId) : undefined
+                    return selected ? [selected, ...items.filter(item => item.id !== selected.id)] : items
+                })
+                if (details) setAgents(details[1])
                 setRecentIds(items.map(item => item.id))
                 setChatError('')
                 try {
                     const rememberedId = localStorage.getItem(activeConversationKey)
-                    setActiveId(current => current ?? (items.some(item => item.id === rememberedId) ? rememberedId : null))
-                    setSelectedAgentId(current => current || items.find(item => item.id === rememberedId)?.agentId || '')
+                    if (!requestedConversationId)
+                        setActiveId(current => current ?? (items.some(item => item.id === rememberedId) ? rememberedId : null))
+                    if (!requestedConversationId)
+                        setSelectedAgentId(current => current || items.find(item => item.id === rememberedId)?.agentId || '')
                 } catch {
                     // The user can still select a conversation from server history.
                 }
@@ -277,10 +400,97 @@ export function Workspace({ children }: { children: ReactNode }) {
                 if (!controller.signal.aborted) setLoadingHistory(false)
             })
         return () => controller.abort()
-    }, [reloadVersion, isHome])
+    }, [reloadVersion, requestedConversationId, user?.id, isHome])
 
     useEffect(() => {
-        if (!isHome || !requestedAgentId || loadingHistory || agentRoute.resolvedId === requestedAgentId) return
+        const controller = new AbortController()
+        let timer: number | undefined
+        let reading = false
+        /**
+         * Refreshes ordinary chat history so received messages appear in the same conversation list.
+         * @returns A promise settled after one serialized saved-history read.
+         */
+        async function refresh() {
+            if (document.visibilityState !== 'visible' || reading || controller.signal.aborted) return
+            reading = true
+            try {
+                const history = await listConversations(controller.signal)
+                if (controller.signal.aborted) return
+                const items = history.filter(item => !deletedConversationIds.current.has(item.id))
+                setHistorySyncError('')
+                setConversations(current => {
+                    const previous = new Map(current.map(item => [item.id, item]))
+                    const runningId = generationController.current ? generation?.conversationId : undefined
+                    return items.map(item => {
+                        const saved = previous.get(item.id)
+                        if (saved && item.id === runningId) return saved
+                        const changed = !saved || saved.updatedAt !== item.updatedAt
+                        const visible = visibleConversation.current
+                        const unread =
+                            saved?.unread ||
+                            (changed &&
+                                item.messages.at(-1)?.role === 'assistant' &&
+                                !(visible.isHome && visible.activeId === item.id && document.visibilityState === 'visible'))
+                        return { ...item, unread }
+                    })
+                })
+                setRecentIds(items.map(item => item.id))
+            } catch {
+                if (!controller.signal.aborted) setHistorySyncError('未能刷新对话，以下是上次成功读取的处理状态。')
+            } finally {
+                reading = false
+                if (!controller.signal.aborted) timer = window.setTimeout(() => void refresh(), 3000)
+            }
+        }
+        /**
+         * Resumes saved-history polling when the user returns to the browser tab.
+         * @returns Nothing; starts one fresh read after clearing the suspended timer.
+         */
+        function resume() {
+            if (document.visibilityState !== 'visible') return
+            if (timer !== undefined) window.clearTimeout(timer)
+            void refresh()
+        }
+        timer = window.setTimeout(() => void refresh(), 3000)
+        document.addEventListener('visibilitychange', resume)
+        return () => {
+            controller.abort()
+            if (timer !== undefined) window.clearTimeout(timer)
+            document.removeEventListener('visibilitychange', resume)
+        }
+    }, [user?.id, generation?.conversationId])
+
+    useEffect(() => {
+        if (!isHome || !requestedConversationId) return
+        const controller = new AbortController()
+        const selection = ++selectionRequest.current
+        getConversation(requestedConversationId, controller.signal)
+            .then(conversation => {
+                if (
+                    controller.signal.aborted ||
+                    selectionRequest.current !== selection ||
+                    conversation.id !== requestedConversationId ||
+                    deletedConversationIds.current.has(conversation.id)
+                )
+                    return
+                setConversations(items => [{ ...conversation, unread: false }, ...items.filter(item => item.id !== conversation.id)])
+                setActiveId(conversation.id)
+                setDraftMentions([])
+                setSelectedAgentId(conversation.agentId ?? '')
+                setConversationRoute({ id: requestedConversationId, ready: true })
+                setChatError('')
+            })
+            .catch(error => {
+                if (!controller.signal.aborted && selectionRequest.current === selection) {
+                    setActiveId(null)
+                    setChatError(errorMessage(error))
+                }
+            })
+        return () => controller.abort()
+    }, [isHome, requestedConversationId, reloadVersion])
+
+    useEffect(() => {
+        if (!isHome || requestedConversationId || !requestedAgentId || loadingHistory || agentRoute.resolvedId === requestedAgentId) return
         const controller = new AbortController()
         const selection = ++selectionRequest.current
         getAgent(requestedAgentId, controller.signal)
@@ -288,6 +498,7 @@ export function Workspace({ children }: { children: ReactNode }) {
                 if (controller.signal.aborted || selectionRequest.current !== selection) return
                 setAgents(items => [profile, ...items.filter(item => item.id !== profile.id)])
                 setSelectedAgentId(profile.id)
+                setSelectedProjectFolderId(undefined)
                 setActiveId(null)
                 rememberConversation(null)
                 setDraft('')
@@ -299,7 +510,7 @@ export function Workspace({ children }: { children: ReactNode }) {
                 if (!controller.signal.aborted && selectionRequest.current === selection) setChatError(errorMessage(error))
             })
         return () => controller.abort()
-    }, [isHome, requestedAgentId, loadingHistory, agentRoute.resolvedId, agentRouteKey])
+    }, [isHome, requestedAgentId, requestedConversationId, loadingHistory, agentRoute.resolvedId, agentRouteKey])
 
     useEffect(() => () => generationController.current?.abort(), [])
 
@@ -313,35 +524,77 @@ export function Workspace({ children }: { children: ReactNode }) {
         return () => window.clearTimeout(timer)
     }, [notice])
 
-    useEffect(() => {
-        if (modalRef.current?.open) modalRef.current.querySelector<HTMLButtonElement>('.dialog-close')?.focus()
-    }, [modalKind])
-
     /**
      * Opens the requested workspace dialog and closes mobile navigation.
      * @param kind - Dialog content to display.
-     * @returns Nothing; updates and opens the native dialog.
+     * @returns Nothing; updates the controlled dialog after closing mobile navigation.
      */
     function openModal(kind: ModalKind) {
-        drawerRef.current?.close()
+        setOpenMobile(false)
         setModalKind(kind)
-        modalRef.current?.showModal()
+        window.setTimeout(() => setModalOpen(true), 0)
     }
 
     /**
      * Starts an empty composer while retaining any background generation.
+     * @param folderId - Personal project for a fresh draft, or undefined for an ungrouped conversation.
      * @returns Nothing; resets selection and navigates to the workspace.
      */
-    function newConversation() {
+    function newConversation(folderId?: string) {
         selectionRequest.current += 1
+        setSelectedProjectFolderId(folderId)
+        setProjectFilesOpen(false)
         setActiveId(null)
         rememberConversation(null)
         setDraft('')
+        setDraftMentions([])
+        setAnswerTarget(null)
         setChatError('')
         setRetryTurn(null)
-        drawerRef.current?.close()
+        setOpenMobile(false)
         router.push('/')
         window.setTimeout(() => inputRef.current?.focus(), 0)
+    }
+
+    /**
+     * Opens a blank general conversation from navigation without creating a saved record.
+     * @returns Nothing; clears the current draft and Agent selection while retaining saved history and background generation.
+     */
+    function startNewConversation() {
+        setSelectedAgentId('')
+        startConversationTransition(() => newConversation())
+    }
+
+    /**
+     * Removes a durably deleted chat and prevents late stream or polling responses from restoring it.
+     * @param id - Exact conversation confirmed deleted by the server.
+     * @returns Nothing; clears only the deleted chat's selection and execution state.
+     */
+    function removeConversationFromHistory(id: string) {
+        deletedConversationIds.current.add(id)
+        setConversations(items => items.filter(item => item.id !== id))
+        setRecentIds(ids => ids.filter(item => item !== id))
+        if (generation?.conversationId === id) {
+            generationController.current?.abort()
+            generationController.current = null
+            cancellation.current = null
+            setGeneration(null)
+        }
+        if (activeId === id) {
+            if (isHome) newConversation()
+            else {
+                selectionRequest.current += 1
+                setActiveId(null)
+                rememberConversation(null)
+                setDraft('')
+                setDraftMentions([])
+                setAnswerTarget(null)
+                setRetryTurn(null)
+                setProjectFilesOpen(false)
+                setChatError('')
+            }
+        }
+        setNotice('对话已删除')
     }
 
     /**
@@ -351,7 +604,23 @@ export function Workspace({ children }: { children: ReactNode }) {
      */
     function selectAgent(id: string) {
         setSelectedAgentId(id)
-        newConversation()
+        newConversation(projectFolderId)
+    }
+
+    /**
+     * Selects a saved project for the unsent conversation without changing its text or assistant.
+     * @param id - Personal project identifier, or empty for a conversation outside any project.
+     * @returns Nothing; updates only an idle draft's project and clears unrelated transient feedback.
+     */
+    function selectProjectFolder(id: string) {
+        if (activeId || executionBusy || retryTurn || loadingHistory || resolvingAgent || resolvingConversation) return
+        if (id && !projectFolders.some(folder => folder.id === id)) return
+        const next = id || undefined
+        if (next === projectFolderId) return
+        selectionRequest.current += 1
+        setSelectedProjectFolderId(next)
+        setProjectFilesOpen(false)
+        setChatError('')
     }
 
     /**
@@ -360,14 +629,18 @@ export function Workspace({ children }: { children: ReactNode }) {
      * @returns A promise resolved after the conversation refresh.
      */
     async function selectConversation(id: string) {
+        setProjectFilesOpen(false)
+        setSelectedProjectFolderId(undefined)
         const selection = ++selectionRequest.current
         setRecentIds(ids => [id, ...ids.filter(item => item !== id)])
         setActiveId(id)
         rememberConversation(id)
         setDraft('')
+        setDraftMentions([])
+        setAnswerTarget(null)
         setChatError('')
         setRetryTurn(null)
-        drawerRef.current?.close()
+        setOpenMobile(false)
         router.push('/')
         if (generation?.conversationId === id) return
         try {
@@ -396,7 +669,18 @@ export function Workspace({ children }: { children: ReactNode }) {
      * Disconnects the active stream so the server cancels model generation.
      * @returns Nothing; the send operation refreshes saved partial output.
      */
-    function stopGeneration() {
+    async function stopGeneration() {
+        if (!generation && activeId && backgroundRequestId) {
+            setGeneration({ conversationId: activeId, requestId: backgroundRequestId, stopping: true })
+            try {
+                updateConversation(await cancelConversation(activeId, backgroundRequestId))
+            } catch (cause) {
+                setChatError(errorMessage(cause))
+            } finally {
+                setGeneration(null)
+            }
+            return
+        }
         setGeneration(current => (current ? { ...current, stopping: true } : null))
         if (generation?.conversationId) {
             const promise = cancelConversation(generation.conversationId, generation.requestId)
@@ -418,14 +702,27 @@ export function Workspace({ children }: { children: ReactNode }) {
      */
     async function sendMessage(text = draft, retry?: RetryTurn) {
         const content = text.trim()
-        if (!content || generationController.current || loadingHistory || resolvingAgent) return
-        if (!chatStatus?.configured) {
-            setChatError('DeepSeek 尚未配置，请在服务端设置 DEEPSEEK_API_KEY 后重新检查。')
+        if (!retry && retryTurn?.conversationId === activeId && retryTurn.content === content) retry = retryTurn
+        if (!content || generationController.current || backgroundRequestId || loadingHistory || resolvingAgent || resolvingConversation)
+            return
+        if (!retry && (staleAnswer || (pendingQuestion && !answerTargetCurrent))) {
+            setChatError('当前问题已经变化，草稿已保留。请先核对当前问题，再决定是否用这份草稿回答。')
             return
         }
+        if (!chatStatus?.configured) {
+            setChatError('尚无可用模型，请到账户设置添加模型连接后重新检查。')
+            return
+        }
+        const selection = selectionRequest.current
         const controller = new AbortController()
         generationController.current = controller
         const requestId = retry?.requestId ?? crypto.randomUUID()
+        const creationProjectId = retry ? retry.projectFolderId : projectFolderId
+        const creationAgentId = retry ? retry.agentId : selectedAgentId || undefined
+        const humanResponse =
+            retry?.humanResponse ??
+            (answerTargetCurrent && answerTarget ? { requestId: answerTarget.requestId, version: answerTarget.version } : undefined)
+        const mentions = humanResponse ? [] : (retry?.mentions ?? trimPersonMentions(text, draftMentions))
         let conversationId = retry ? retry.conversationId : activeId
         const assistantId = `${requestId}:assistant`
         let failure = ''
@@ -436,7 +733,10 @@ export function Workspace({ children }: { children: ReactNode }) {
         setDraft('')
         try {
             if (!conversationId) {
-                const conversation = await createConversation(content.slice(0, 40), controller.signal, selectedAgentId || undefined)
+                const conversation = await createConversation(content.slice(0, 40), controller.signal, creationAgentId, {
+                    ...(creationProjectId ? { projectFolderId: creationProjectId } : {}),
+                    requestId,
+                })
                 conversationId = conversation.id
                 controller.signal.throwIfAborted()
                 setConversations(items => [conversation, ...items.filter(item => item.id !== conversation.id)])
@@ -477,8 +777,10 @@ export function Workspace({ children }: { children: ReactNode }) {
                         : item
                 )
             )
-            setActiveId(id)
-            rememberConversation(id)
+            if (selectionRequest.current === selection) {
+                setActiveId(id)
+                rememberConversation(id)
+            }
             setRecentIds(ids => [id, ...ids.filter(item => item !== id)])
             setGeneration({ conversationId: id, requestId })
             /**
@@ -491,12 +793,22 @@ export function Workspace({ children }: { children: ReactNode }) {
                 if (event.type === 'done' || event.type === 'cancelled') completed = true
                 updateGeneratedReply(id, assistantId, event)
             }
-            await streamMessage(id, content, requestId, receiveEvent, controller.signal)
+            if (humanResponse) await streamMessage(id, content, requestId, receiveEvent, controller.signal, mentions, humanResponse)
+            else await streamMessage(id, content, requestId, receiveEvent, controller.signal, mentions)
+            if (selectionRequest.current === selection) setDraftMentions([])
             if (failure) throw new Error(failure)
         } catch (error) {
-            if (!controller.signal.aborted) {
+            if (!controller.signal.aborted && selectionRequest.current === selection) {
                 setChatError(errorMessage(error))
-                setRetryTurn({ conversationId, content, requestId })
+                setRetryTurn({
+                    conversationId,
+                    content,
+                    requestId,
+                    ...(creationProjectId ? { projectFolderId: creationProjectId } : {}),
+                    ...(creationAgentId ? { agentId: creationAgentId } : {}),
+                    ...(mentions.length ? { mentions } : {}),
+                    ...(humanResponse ? { humanResponse } : {}),
+                })
             }
             if (conversationId && !completed) {
                 try {
@@ -505,14 +817,25 @@ export function Workspace({ children }: { children: ReactNode }) {
                             ? await cancellation.current.promise
                             : await getConversation(conversationId)
                     updateConversation(conversation)
+                    if (conversation.messages.some(message => message.role === 'user' && message.requestId === requestId)) {
+                        setRetryTurn(null)
+                        setChatError('')
+                        if (!controller.signal.aborted) setNotice('这条输入已保存，已重新读取当前处理状态。')
+                    }
                     if (
-                        controller.signal.aborted &&
+                        selectionRequest.current === selection &&
                         !conversation.messages.some(message => message.role === 'user' && message.requestId === requestId)
                     ) {
                         setDraft(current => current || content)
+                        setDraftMentions(current => (current.length ? current : mentions))
                     }
                 } catch {
-                    if (controller.signal.aborted) setChatError('生成已停止，但未能确认保存结果。请重新连接以载入对话。')
+                    if (humanResponse && selectionRequest.current === selection) {
+                        setDraft(current => current || content)
+                        setAnswerTarget({ conversationId, ...humanResponse })
+                    }
+                    if (controller.signal.aborted && selectionRequest.current === selection)
+                        setChatError('生成已停止，但未能确认保存结果。请重新连接以载入对话。')
                     setConversations(items =>
                         items.map(item =>
                             item.id === conversationId
@@ -528,8 +851,9 @@ export function Workspace({ children }: { children: ReactNode }) {
                         )
                     )
                 }
-            } else if (!conversationId) {
+            } else if (!conversationId && selectionRequest.current === selection) {
                 setDraft(current => current || content)
+                setDraftMentions(current => (current.length ? current : mentions))
             }
         } finally {
             if (generationController.current === controller) {
@@ -569,136 +893,118 @@ export function Workspace({ children }: { children: ReactNode }) {
     }
 
     /**
-     * Builds shared desktop and mobile workspace navigation.
-     * @param mobile - Whether the navigation is inside the mobile drawer.
-     * @returns Sidebar navigation and account controls.
+     * Refreshes saved private history after a source-bound collaboration event changes.
+     * @returns Nothing; ignores late responses for a different current conversation.
      */
-    function sidebarContent(mobile = false) {
-        return (
-            <>
-                <div className="sidebar-brand">
-                    <Link href="/" onClick={() => drawerRef.current?.close()} className="wordmark">
-                        orbit<span className="wordmark-dot">.</span>
-                    </Link>
-                    {mobile ? (
-                        <button className="icon-button" aria-label="关闭导航" onClick={() => drawerRef.current?.close()}>
-                            <X size={18} />
-                        </button>
-                    ) : (
-                        <button
-                            className="icon-button new-conversation-button"
-                            aria-label="新对话"
-                            title="新对话"
-                            onClick={newConversation}
-                        >
-                            <SquarePen size={19} />
-                        </button>
-                    )}
-                </div>
-                <nav className="sidebar-nav" aria-label="工作区导航">
-                    {mobile ? (
-                        <button className="sidebar-nav-link new-chat-link" onClick={newConversation}>
-                            <SquarePen size={18} />
-                            <span>新对话</span>
-                        </button>
-                    ) : (
-                        <Link href="/" className={`sidebar-nav-link ${isHome ? 'active' : ''}`} aria-current={isHome ? 'page' : undefined}>
-                            <Home size={18} />
-                            <span>工作台</span>
-                        </Link>
-                    )}
-                    <Link
-                        href="/agents"
-                        className={`sidebar-nav-link ${mobile ? 'drawer-page-link' : ''} ${pathname === '/agents' ? 'active' : ''}`}
-                        aria-current={pathname === '/agents' ? 'page' : undefined}
-                        onClick={() => drawerRef.current?.close()}
-                    >
-                        <Bot size={18} />
-                        <span>Agents</span>
-                    </Link>
-                    <Link
-                        href="/rag"
-                        className={`sidebar-nav-link ${mobile ? 'drawer-page-link' : ''} ${pathname === '/rag' ? 'active' : ''}`}
-                        aria-current={pathname === '/rag' ? 'page' : undefined}
-                        onClick={() => drawerRef.current?.close()}
-                    >
-                        <Folder size={18} />
-                        <span>资料库</span>
-                    </Link>
-                    <Link
-                        href="/projects"
-                        className={`sidebar-nav-link ${mobile ? 'drawer-page-link' : ''} ${isProjects ? 'active' : ''}`}
-                        aria-current={isProjects ? 'page' : undefined}
-                        onClick={() => drawerRef.current?.close()}
-                    >
-                        <Folder size={18} />
-                        <span>项目</span>
-                    </Link>
-                    <Link
-                        href="/templates"
-                        className={`sidebar-nav-link ${mobile ? 'drawer-page-link' : ''} ${isTemplates ? 'active' : ''}`}
-                        aria-current={isTemplates ? 'page' : undefined}
-                        onClick={() => drawerRef.current?.close()}
-                    >
-                        <Layers size={18} />
-                        <span>任务模板</span>
-                    </Link>
-                    <Link
-                        href="/inbox"
-                        className={`sidebar-nav-link ${mobile ? 'drawer-page-link' : ''} ${isTasks ? 'active' : ''}`}
-                        aria-current={isTasks ? 'page' : undefined}
-                        onClick={() => drawerRef.current?.close()}
-                    >
-                        <Inbox size={18} />
-                        <span>任务</span>
-                    </Link>
-                </nav>
-                <div className="sidebar-scroll">
-                    {(mobile || hasMessages || !isHome) && (
-                        <div className="sidebar-section recent-sidebar">
-                            <button
-                                className="project-toggle"
-                                aria-expanded={historyExpanded}
-                                onClick={() => setHistoryExpanded(value => !value)}
-                            >
-                                <MessageSquare size={15} aria-hidden="true" />
-                                <span>全部对话</span>
-                                <ChevronRight className={historyExpanded ? 'rotated' : ''} size={13} />
-                            </button>
-                            {historyExpanded &&
-                                conversations.map(item => (
-                                    <button
-                                        key={item.id}
-                                        onClick={() => selectConversation(item.id)}
-                                        className={`conversation-link recent-link ${activeId === item.id && isHome ? 'selected' : ''}`}
-                                        title={item.title}
-                                        aria-label={item.title + (item.unread ? '，未读消息' : '')}
-                                        aria-current={activeId === item.id && isHome ? 'page' : undefined}
-                                    >
-                                        <span className="conversation-title">{item.title}</span>
-                                        {item.unread && <span className="conversation-unread" aria-hidden="true" />}
-                                    </button>
-                                ))}
-                        </div>
-                    )}
-                </div>
-                <div className="sidebar-bottom">
-                    <button className="sidebar-utility sidebar-more" onClick={() => openModal('more')}>
-                        <MoreHorizontal size={18} />
-                        <span>更多</span>
-                    </button>
-                    <button className="profile-button" onClick={() => openModal('workspace')}>
-                        <span className="avatar">K</span>
-                        <span className="profile-text">
-                            <strong>Kijune</strong>
-                        </span>
-                        <ChevronDown size={13} />
-                    </button>
-                </div>
-            </>
-        )
+    function refreshCollaborationHistory() {
+        if (!activeId) return
+        const selectedId = activeId
+        void getConversation(selectedId)
+            .then(conversation => {
+                if (
+                    visibleConversation.current.activeId === selectedId &&
+                    !generationController.current &&
+                    !deletedConversationIds.current.has(conversation.id)
+                )
+                    setConversations(items => [conversation, ...items.filter(item => item.id !== selectedId)])
+            })
+            .catch(() => undefined)
     }
 
+    /**
+     * Preserves the existing composer draft while explicitly inserting a suggestion for this question.
+     * @param request - Exact currently displayed question selected by the person.
+     * @param text - Suggested answer to append without automatically submitting it.
+     * @returns Nothing; updates the ordinary editor and retains the exact question binding.
+     */
+    function useAnswerSuggestion(request: HumanRequest, text: string) {
+        if (!activeId || request.id !== pendingQuestion?.id || request.version !== pendingQuestion.version || executionBusy) return
+        const next = draft ? `${draft}\n${text}` : text
+        if (next.length > 32_000) {
+            setChatError('消息最多 32,000 字，原草稿已保留。')
+            return
+        }
+        setDraft(next)
+        setAnswerTarget({ conversationId: activeId, requestId: request.id, version: request.version })
+        setChatError('')
+        inputRef.current?.focus()
+    }
+
+    /**
+     * Binds a newly edited answer to the visible question without rebinding an existing draft after polling.
+     * @param value - Updated contents of the one ordinary bottom composer.
+     * @returns Nothing; retains the draft and its first explicit question association.
+     */
+    function changeComposerDraft(value: string) {
+        if (!value.trim() || !draft.trim()) {
+            setAnswerTarget(
+                value.trim() && pendingQuestion && activeId
+                    ? { conversationId: activeId, requestId: pendingQuestion.id, version: pendingQuestion.version }
+                    : null
+            )
+        }
+        setDraft(value)
+    }
+
+    /**
+     * Applies a durable human decision without treating approval as successful tool execution.
+     * @param conversation - Server-saved state after a decision or its reconciliation read.
+     * @returns Nothing; refreshes private history and clears an explicitly cancelled question binding.
+     */
+    function updateHumanDecision(conversation: ChatConversation) {
+        updateConversation(conversation)
+        const answered = conversation.humanRequests?.find(request => request.id === answerTarget?.requestId)
+        if (answered?.status === 'cancelled' && conversation.id === answerTarget?.conversationId) {
+            setAnswerTarget(null)
+            setRetryTurn(null)
+            setChatError('')
+        }
+    }
+
+    const humanPanel =
+        activeConversation && !resolvingConversation ? (
+            <HumanRequestPanel
+                key={`human:${activeConversation.id}`}
+                conversation={activeConversation}
+                kind="approval"
+                disabled={executionBusy}
+                onSuggestion={useAnswerSuggestion}
+                onSaved={updateHumanDecision}
+            />
+        ) : null
+    const questionPanel =
+        activeConversation && pendingQuestion && !resolvingConversation ? (
+            <div className="mb-3 max-h-[min(40dvh,18rem)] overflow-y-auto overscroll-contain px-1 py-1">
+                <HumanRequestPanel
+                    key={`question:${activeConversation.id}`}
+                    conversation={activeConversation}
+                    kind="question"
+                    disabled={executionBusy}
+                    onSuggestion={useAnswerSuggestion}
+                    onSaved={updateHumanDecision}
+                />
+            </div>
+        ) : null
+    const collaborationPanel =
+        activeId && !resolvingConversation ? (
+            <CollaborationSourcePanel
+                key={`collaboration:${activeId}`}
+                source={{ kind: activeConversation?.task ? 'task' : 'conversation', id: activeId }}
+                eventId={requestedEventId}
+                onHistoryChange={refreshCollaborationHistory}
+                showDetails={false}
+                messages={displayedMessages}
+                getMessageAnchor={getMessageAnchor}
+            />
+        ) : null
+
+    const navigation = [
+        { href: '/agents', label: 'Agents', Icon: Bot, active: pathname === '/agents' || pathname.startsWith('/agents/') },
+        { href: '/skills', label: 'Skills', Icon: BookOpen, active: pathname === '/skills' || pathname.startsWith('/skills/') },
+        { href: '/rag', label: '资料库', Icon: Folder, active: pathname.startsWith('/rag') },
+        { href: '/templates', label: '任务模板', Icon: Layers, active: isTemplates },
+        { href: '/inbox', label: '任务', Icon: Inbox, active: isTasks },
+    ]
     const modalTitles: Record<ModalKind, string> = {
         workspace: '你的工作空间',
         files: '对话资料',
@@ -715,272 +1021,535 @@ export function Workspace({ children }: { children: ReactNode }) {
             <a className="skip-link" href="#main-content">
                 跳到工作区
             </a>
-            <aside className="sidebar" aria-label="工作区侧栏">
-                {sidebarContent()}
-            </aside>
-            <main id="main-content" className={`main-panel ${isHome && !hasMessages ? 'home-overview' : ''}`} tabIndex={-1}>
-                <header className={`workspace-header ${isHome ? 'home-header' : ''}`}>
-                    <button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => drawerRef.current?.showModal()}>
-                        <Menu size={18} />
-                    </button>
-                    {isHome && !hasMessages && <h1 className="workspace-page-title">工作台</h1>}
-                    <button className="header-location" onClick={() => openModal('workspace')} aria-label="orbit. 个人工作区">
-                        <span className="header-label-desktop">个人工作区</span>
-                        <span className="header-label-mobile">
-                            orbit<span className="wordmark-dot">.</span>
-                        </span>
-                        <ChevronDown size={12} />
-                    </button>
-                    {isHome && hasMessages && <h1 className="active-conversation-title">{shownConversation?.title}</h1>}
-                    <div className="header-actions">
-                        {isHome && hasMessages && (
-                            <button className="icon-button" title="新对话" aria-label="开始新对话" onClick={newConversation}>
-                                <Plus size={18} />
-                            </button>
-                        )}
-                        <button
-                            className="icon-button header-settings"
-                            aria-label="工作区设置"
-                            title="工作区设置"
-                            onClick={() => openModal('settings')}
-                        >
-                            <SlidersHorizontal size={17} />
-                        </button>
+            <Sidebar aria-label="工作区侧栏">
+                <SidebarHeader>
+                    <div className="flex items-center justify-between gap-2 p-2">
+                        <Link href="/" onClick={() => setOpenMobile(false)} className="text-2xl font-semibold tracking-tighter">
+                            orbit<span className="text-ring">.</span>
+                        </Link>
+                        {isMobile && <SidebarTrigger aria-label="关闭导航" />}
                     </div>
+                    <WorkspaceSelector onNavigate={() => setOpenMobile(false)} />
+                </SidebarHeader>
+                <SidebarContent>
+                    <SidebarGroup>
+                        <SidebarGroupContent>
+                            <SidebarMenu>
+                                <SidebarMenuItem>
+                                    <SidebarMenuButton
+                                        isActive={isHome && !activeId && !requestedConversationId && !projectFolderId}
+                                        onClick={startNewConversation}
+                                        disabled={startingConversation}
+                                    >
+                                        <WorkspaceNavigationLabel
+                                            label="开始新对话"
+                                            icon={SquarePen}
+                                            pending={startingConversation}
+                                            pendingLabel="正在打开新对话…"
+                                        />
+                                    </SidebarMenuButton>
+                                </SidebarMenuItem>
+                                {navigation.map(({ href, label, Icon, active }) => (
+                                    <SidebarMenuItem key={href}>
+                                        <SidebarMenuButton
+                                            render={<Link href={href} />}
+                                            isActive={active}
+                                            aria-current={active ? 'page' : undefined}
+                                            onClick={() => setOpenMobile(false)}
+                                        >
+                                            <WorkspaceNavigationContent label={label} icon={Icon} />
+                                        </SidebarMenuButton>
+                                    </SidebarMenuItem>
+                                ))}
+                            </SidebarMenu>
+                        </SidebarGroupContent>
+                    </SidebarGroup>
+                    <SidebarSeparator />
+                    <ProjectFolders
+                        userId={user?.id}
+                        folders={projectFolders}
+                        onFoldersChange={setProjectFolders}
+                        conversations={orderedConversations}
+                        activeId={isHome ? activeId : null}
+                        activeFolderId={projectFolderId}
+                        onSelectConversation={id => void selectConversation(id)}
+                        onDeleted={removeConversationFromHistory}
+                        onNewConversation={folder => {
+                            setSelectedAgentId('')
+                            newConversation(folder.id)
+                        }}
+                    />
+                    <SidebarGroup>
+                        <Collapsible open={historyExpanded} onOpenChange={setHistoryExpanded}>
+                            <CollapsibleTrigger render={<SidebarMenuButton />}>
+                                <MessageSquare aria-hidden="true" />
+                                <span>全部对话</span>
+                                <ChevronDown className="ml-auto" aria-hidden="true" />
+                            </CollapsibleTrigger>
+                            <CollapsibleContent>
+                                <SidebarMenu className="mt-2">
+                                    {loadingHistory && (
+                                        <SidebarMenuItem>
+                                            <p className="px-2 text-sm text-muted-foreground" role="status">
+                                                正在载入对话…
+                                            </p>
+                                        </SidebarMenuItem>
+                                    )}
+                                    {!loadingHistory && !conversations.length && (
+                                        <SidebarMenuItem>
+                                            <p className="px-2 text-sm text-muted-foreground">所有对话会显示在这里</p>
+                                        </SidebarMenuItem>
+                                    )}
+                                    {orderedConversations.map(item => (
+                                        <ConversationHistoryItem
+                                            key={item.id}
+                                            conversation={item}
+                                            isActive={activeId === item.id && isHome}
+                                            onSelect={id => void selectConversation(id)}
+                                            onDeleted={removeConversationFromHistory}
+                                        />
+                                    ))}
+                                </SidebarMenu>
+                            </CollapsibleContent>
+                        </Collapsible>
+                    </SidebarGroup>
+                </SidebarContent>
+                <SidebarFooter>
+                    <UserMenu
+                        onOpenPanel={openModal}
+                        onNavigate={() => setOpenMobile(false)}
+                        onSignedOut={() => {
+                            rememberConversation(null)
+                            generationController.current?.abort()
+                        }}
+                    />
+                </SidebarFooter>
+            </Sidebar>
+            <SidebarInset id="main-content" className="main-panel" tabIndex={-1}>
+                <header className="workspace-header md:hidden">
+                    <SidebarTrigger aria-label="打开导航" />
+                    <Link href="/" className="font-semibold">
+                        orbit<span className="text-ring">.</span>
+                    </Link>
+                    <Button variant="ghost" size="icon" className="ml-auto" aria-label="工作区设置" onClick={() => openModal('settings')}>
+                        <SlidersHorizontal aria-hidden="true" />
+                    </Button>
+                    {isHome && projectFolderId && (
+                        <Button
+                            ref={mobileProjectFilesRef}
+                            variant="ghost"
+                            size="icon"
+                            aria-label="打开项目资料"
+                            onClick={() => setProjectFilesOpen(true)}
+                        >
+                            <Files aria-hidden="true" />
+                        </Button>
+                    )}
                 </header>
-                <section className={`chat-home ${hasMessages ? 'with-messages' : ''}`} hidden={!isHome} aria-label="Agent 对话">
-                    {hasMessages ? (
-                        <>
+                {isHome && projectFolderId && (
+                    <div className="hidden h-14 shrink-0 items-center justify-between gap-3 px-6 md:flex">
+                        <span className="min-w-0 truncate text-sm text-muted-foreground" title={projectName}>
+                            {projectName}
+                        </span>
+                        <Button
+                            ref={desktopProjectFilesRef}
+                            variant="ghost"
+                            size="icon"
+                            aria-label="打开项目资料"
+                            onClick={() => setProjectFilesOpen(true)}
+                        >
+                            <Files aria-hidden="true" />
+                        </Button>
+                    </div>
+                )}
+                {isHome ? (
+                    <section className={`chat-home ${hasMessages ? 'with-messages' : ''}`} aria-label="Agent 对话">
+                        {hasMessages ? (
                             <div className="message-scroll">
                                 <div className="messages">
-                                    {shownConversation?.messages.map((message, index) =>
-                                        message.role === 'user' ? (
-                                            <div className="user-message" key={message.id}>
-                                                {message.content}
-                                            </div>
-                                        ) : (
-                                            <article className="assistant-message" key={message.id}>
-                                                <div className="answer-content">
-                                                    <div className="assistant-label">
-                                                        {activeConversation?.agent?.name ?? selectedAgent?.name ?? model}
+                                    {displayedMessages.map((message, index) => (
+                                        <div key={message.id} className="min-w-0" data-chat-message-id={message.id}>
+                                            {message.role === 'user' ? (
+                                                <div className="user-message">{message.content}</div>
+                                            ) : (
+                                                <article
+                                                    className="assistant-message"
+                                                    data-consecutive={displayedMessages[index - 1]?.role === 'assistant' || undefined}
+                                                    aria-label={message.kind === 'relay' ? '协作消息' : 'Agent 回复'}
+                                                >
+                                                    <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+                                                        <span className="font-medium text-foreground">
+                                                            {message.kind === 'relay'
+                                                                ? '协作消息'
+                                                                : (activeConversation?.agent?.name ?? selectedAgent?.name ?? model)}
+                                                        </span>
+                                                        <time dateTime={message.createdAt} className="text-xs text-muted-foreground">
+                                                            {new Date(message.createdAt).toLocaleTimeString('zh-CN', {
+                                                                hour: '2-digit',
+                                                                minute: '2-digit',
+                                                            })}
+                                                        </time>
                                                         {generation?.conversationId === activeId &&
-                                                            index === shownConversation.messages.length - 1 && (
-                                                                <span>
+                                                            index === displayedMessages.length - 1 && (
+                                                                <Badge variant="secondary">
                                                                     {generation.stopping
                                                                         ? '正在停止…'
                                                                         : message.content
                                                                           ? '正在回答…'
                                                                           : '正在思考…'}
-                                                                </span>
+                                                                </Badge>
                                                             )}
                                                     </div>
                                                     {message.reasoning && (
-                                                        <details className="answer-reasoning">
-                                                            <summary>思考过程</summary>
-                                                            <div>{message.reasoning}</div>
-                                                        </details>
+                                                        <Collapsible className="mb-4">
+                                                            <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
+                                                                思考过程
+                                                                <ChevronDown aria-hidden="true" />
+                                                            </CollapsibleTrigger>
+                                                            <CollapsibleContent className="whitespace-pre-wrap break-words py-3 text-sm text-muted-foreground">
+                                                                {message.reasoning}
+                                                            </CollapsibleContent>
+                                                        </Collapsible>
                                                     )}
                                                     {message.content ? (
-                                                        <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
+                                                        <div
+                                                            className={`markdown-content${message.kind ? ' [&_p]:whitespace-pre-wrap' : ''}`}
+                                                        >
+                                                            <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
+                                                        </div>
                                                     ) : generation?.conversationId === activeId &&
                                                       generation.requestId === message.requestId ? (
-                                                        <div className="thinking-dots" aria-label="正在生成回答">
-                                                            <i />
-                                                            <i />
-                                                            <i />
-                                                        </div>
-                                                    ) : (
-                                                        <p className="muted">
+                                                        <p role="status" className="text-sm text-muted-foreground">
+                                                            正在生成回答…
+                                                        </p>
+                                                    ) : backgroundRequestId && backgroundRequestId === message.requestId ? (
+                                                        <p role="status" className="text-sm text-muted-foreground">
+                                                            Agent 正在后台执行…
+                                                        </p>
+                                                    ) : message.status !== 'complete' ? (
+                                                        <FeedbackMessage variant={message.status === 'error' ? 'error' : 'info'}>
                                                             {message.status === 'error'
                                                                 ? '回答未完成，请重试。'
                                                                 : '已停止生成，可以继续提问。'}
-                                                        </p>
-                                                    )}
+                                                        </FeedbackMessage>
+                                                    ) : null}
                                                     {message.content && (!generation || generation.requestId !== message.requestId) && (
-                                                        <div className="answer-actions">
-                                                            <button onClick={() => copyMessage(message.content)} className="text-button">
-                                                                <Copy size={14} />
+                                                        <div className="mt-3 flex items-center gap-2">
+                                                            <Button variant="ghost" size="sm" onClick={() => copyMessage(message.content)}>
+                                                                <Copy aria-hidden="true" />
                                                                 复制回答
-                                                            </button>
-                                                            {message.status === 'cancelled' && <span className="muted">已停止</span>}
-                                                            {message.status === 'error' && <span className="muted">回答未完成</span>}
+                                                            </Button>
+                                                            {message.status === 'cancelled' && <Badge variant="info">已停止</Badge>}
+                                                            {message.status === 'error' && <Badge variant="destructive">回答未完成</Badge>}
                                                         </div>
                                                     )}
                                                     {!generation &&
                                                         !retryTurn &&
                                                         message.status !== 'complete' &&
-                                                        index === shownConversation.messages.length - 1 && (
-                                                            <button className="text-button" type="button" onClick={retryLastTurn}>
+                                                        index === displayedMessages.length - 1 && (
+                                                            <Button variant="outline" size="sm" onClick={retryLastTurn}>
                                                                 重新生成
-                                                            </button>
+                                                            </Button>
                                                         )}
-                                                </div>
-                                            </article>
-                                        )
-                                    )}
+                                                </article>
+                                            )}
+                                            <div
+                                                className="chat-message-receipt min-w-0"
+                                                ref={element => {
+                                                    if (element) messageAnchors.current.set(message.id, element)
+                                                    else messageAnchors.current.delete(message.id)
+                                                }}
+                                            />
+                                        </div>
+                                    ))}
+                                    {collaborationPanel}
+                                    {humanPanel}
                                     <div ref={endRef} />
                                 </div>
                             </div>
-                        </>
-                    ) : (
-                        <div className="home-task-heading">
-                            <h2>新对话</h2>
-                            <button className="starter-trigger" type="button" aria-label="示例问题" onClick={() => openModal('starters')}>
-                                <CircleHelp size={15} aria-hidden="true" />
-                                示例问题
-                            </button>
-                        </div>
-                    )}
-                    <div className="compose-area">
-                        <div className="composer-wrap">
-                            <form
-                                className="composer"
-                                onSubmit={event => {
-                                    event.preventDefault()
-                                    sendMessage()
-                                }}
-                            >
-                                <label className="sr-only" htmlFor="task-input">
-                                    描述你的任务
-                                </label>
-                                <textarea
-                                    id="task-input"
-                                    ref={inputRef}
-                                    value={draft}
-                                    maxLength={32_000}
-                                    onChange={event => setDraft(event.target.value)}
-                                    placeholder={hasMessages ? '继续讨论…' : '描述问题，或添加相关资料…'}
-                                    title="Enter 发送，Shift+Enter 换行"
-                                    rows={1}
-                                    onKeyDown={event => {
-                                        if (
-                                            event.key === 'Enter' &&
-                                            !event.shiftKey &&
-                                            !event.nativeEvent.isComposing &&
-                                            event.keyCode !== 229
-                                        ) {
+                        ) : (
+                            <div className="chat-start-header">
+                                <div className="home-task-heading">
+                                    <h1 className="text-2xl font-semibold tracking-tight">新对话</h1>
+                                    <Button variant="ghost" size="sm" onClick={() => openModal('starters')}>
+                                        <CircleHelp aria-hidden="true" />
+                                        示例问题
+                                    </Button>
+                                </div>
+                                {collaborationPanel}
+                                {humanPanel}
+                            </div>
+                        )}
+                        <div className="compose-area">
+                            {historySyncError && (activeConversation?.humanRequests?.length || backgroundRequestId) ? (
+                                <FeedbackMessage variant="warning" className="mb-3">
+                                    {historySyncError}
+                                </FeedbackMessage>
+                            ) : null}
+                            {questionPanel}
+                            {pendingQuestion?.kind === 'question' && staleAnswer && (
+                                <div className="mb-3 min-w-0 space-y-2 text-sm [overflow-wrap:anywhere]" role="status">
+                                    <>
+                                        <p className="text-muted-foreground">问题已变化，原草稿尚未关联当前问题。请核对后再继续。</p>
+                                        <Button
+                                            variant="outline"
+                                            disabled={executionBusy}
+                                            onClick={() => {
+                                                if (activeId)
+                                                    setAnswerTarget({
+                                                        conversationId: activeId,
+                                                        requestId: pendingQuestion.id,
+                                                        version: pendingQuestion.version,
+                                                    })
+                                                setRetryTurn(null)
+                                                setChatError('')
+                                                inputRef.current?.focus()
+                                            }}
+                                        >
+                                            已核对，将草稿用于当前问题
+                                        </Button>
+                                    </>
+                                </div>
+                            )}
+                            {staleAnswer && !pendingQuestion && (
+                                <FeedbackMessage variant="warning" className="mb-3">
+                                    <p>原问题已结束，草稿已保留。</p>
+                                    <Button
+                                        variant="outline"
+                                        onClick={() => {
+                                            setAnswerTarget(null)
+                                            setRetryTurn(null)
+                                            setChatError('')
+                                        }}
+                                    >
+                                        将草稿用于新讨论
+                                    </Button>
+                                </FeedbackMessage>
+                            )}
+                            <Card className="composer-surface py-2">
+                                <CardContent className="px-2">
+                                    <form
+                                        className="grid gap-3"
+                                        onSubmit={event => {
                                             event.preventDefault()
                                             sendMessage()
-                                        }
-                                    }}
-                                />
-                                <div className="composer-toolbar">
-                                    <div className="compose-tools">
-                                        <div className="compose-context">
-                                            <button
-                                                type="button"
-                                                className="context-toggle"
-                                                aria-label="查看资料功能状态"
-                                                onClick={() => openModal('files')}
-                                            >
-                                                <Paperclip size={16} />
-                                                <span>添加资料</span>
-                                            </button>
+                                        }}
+                                    >
+                                        <Label className="sr-only" htmlFor="task-input">
+                                            {pendingQuestion ? '回答当前问题' : '描述你的任务'}
+                                        </Label>
+                                        <div className="px-3 pt-3">
+                                            <MessageComposer
+                                                id="task-input"
+                                                describedBy={pendingQuestion ? `human-question-${pendingQuestion.id}` : undefined}
+                                                inputRef={inputRef}
+                                                value={draft}
+                                                onChange={changeComposerDraft}
+                                                mentions={draftMentions}
+                                                onMentionsChange={setDraftMentions}
+                                                onSend={() => void sendMessage()}
+                                                placeholder={
+                                                    pendingQuestion
+                                                        ? '输入你的答案，或修改建议后发送…'
+                                                        : hasMessages
+                                                          ? '继续讨论…'
+                                                          : '描述问题，或添加相关资料…'
+                                                }
+                                            />
                                         </div>
-                                    </div>
-                                    <div className="composer-right">
-                                        <label className="agent-select">
-                                            <span aria-hidden="true">{agent}</span>
-                                            <select
-                                                aria-label="选择助手"
-                                                value={activeConversation?.agentId ?? selectedAgentId}
-                                                onChange={event => selectAgent(event.target.value)}
-                                            >
-                                                <option value="">通用助手</option>
-                                                {agents.map(profile => (
-                                                    <option value={profile.id} key={profile.id}>
-                                                        {profile.name}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            <ChevronDown size={12} />
-                                        </label>
-                                        {generation ? (
-                                            <button
-                                                type="button"
-                                                className="send-button"
-                                                aria-label="停止生成"
-                                                onClick={stopGeneration}
-                                                disabled={generation.stopping}
-                                            >
-                                                <Square size={14} fill="currentColor" />
-                                            </button>
-                                        ) : (
-                                            <button
-                                                className="send-button"
-                                                type="submit"
-                                                disabled={!draft.trim() || loadingHistory || resolvingAgent || !chatStatus?.configured}
-                                                aria-label="发送任务"
-                                            >
-                                                <ArrowUp size={18} />
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                            </form>
-                            <div className="chat-service-status" role="status" aria-live="polite">
+                                        <div className="flex min-w-0 items-center justify-between gap-2 pl-2">
+                                            <div className="flex min-w-0 flex-1 items-center gap-1">
+                                                <DropdownMenu>
+                                                    <DropdownMenuTrigger
+                                                        type="button"
+                                                        aria-label="选择助手"
+                                                        className="inline-flex h-11 min-w-0 max-w-48 cursor-pointer items-center gap-1 border-0 bg-transparent px-2 text-base text-foreground outline-none focus-visible:text-primary focus-visible:underline focus-visible:underline-offset-4 md:text-sm"
+                                                    >
+                                                        <span className="truncate">{composerAgentName}</span>
+                                                        <ChevronDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                                    </DropdownMenuTrigger>
+                                                    <DropdownMenuContent
+                                                        side="top"
+                                                        align="start"
+                                                        className="min-w-48 max-w-[calc(100vw-2rem)]"
+                                                    >
+                                                        <DropdownMenuRadioGroup
+                                                            value={activeConversation?.agentId ?? selectedAgentId}
+                                                            onValueChange={selectAgent}
+                                                        >
+                                                            <DropdownMenuRadioItem value="" className="min-h-11" closeOnClick>
+                                                                通用助手
+                                                            </DropdownMenuRadioItem>
+                                                            {agents.map(profile => (
+                                                                <DropdownMenuRadioItem
+                                                                    value={profile.id}
+                                                                    key={profile.id}
+                                                                    className="min-h-11"
+                                                                    closeOnClick
+                                                                >
+                                                                    <span className="min-w-0 break-words">{profile.name}</span>
+                                                                </DropdownMenuRadioItem>
+                                                            ))}
+                                                        </DropdownMenuRadioGroup>
+                                                    </DropdownMenuContent>
+                                                </DropdownMenu>
+                                                <DropdownMenu>
+                                                    <DropdownMenuTrigger
+                                                        type="button"
+                                                        aria-label="选择项目"
+                                                        disabled={
+                                                            Boolean(activeId) ||
+                                                            executionBusy ||
+                                                            Boolean(retryTurn) ||
+                                                            loadingHistory ||
+                                                            resolvingAgent ||
+                                                            resolvingConversation
+                                                        }
+                                                        title={
+                                                            activeId
+                                                                ? '已有对话的项目归属已固定，新对话可选择项目'
+                                                                : projectFolderId
+                                                                  ? projectName
+                                                                  : '选择项目'
+                                                        }
+                                                        className="inline-flex h-11 min-w-0 max-w-48 cursor-pointer items-center gap-1 border-0 bg-transparent px-2 text-base text-foreground outline-none focus-visible:text-primary focus-visible:underline focus-visible:underline-offset-4 disabled:cursor-default disabled:text-muted-foreground md:text-sm"
+                                                    >
+                                                        <Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                                        <span className="truncate">{projectFolderId ? projectName : '选择项目'}</span>
+                                                        <ChevronDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                                    </DropdownMenuTrigger>
+                                                    <DropdownMenuContent
+                                                        side="top"
+                                                        align="start"
+                                                        className="min-w-48 max-w-[calc(100vw-2rem)]"
+                                                    >
+                                                        <DropdownMenuRadioGroup
+                                                            value={projectFolderId ?? ''}
+                                                            onValueChange={selectProjectFolder}
+                                                        >
+                                                            <DropdownMenuRadioItem value="" className="min-h-11" closeOnClick>
+                                                                不选择项目
+                                                            </DropdownMenuRadioItem>
+                                                            {projectFolders.map(folder => (
+                                                                <DropdownMenuRadioItem
+                                                                    value={folder.id}
+                                                                    key={folder.id}
+                                                                    className="min-h-11"
+                                                                    closeOnClick
+                                                                >
+                                                                    <span className="min-w-0 break-words">{folder.name}</span>
+                                                                </DropdownMenuRadioItem>
+                                                            ))}
+                                                        </DropdownMenuRadioGroup>
+                                                    </DropdownMenuContent>
+                                                </DropdownMenu>
+                                            </div>
+                                            {executionBusy ? (
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="icon-lg"
+                                                    className="rounded-full p-1.5 hover:bg-transparent"
+                                                    aria-label="停止生成"
+                                                    onClick={stopGeneration}
+                                                    disabled={generation?.stopping}
+                                                >
+                                                    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground group-hover/button:bg-primary/90">
+                                                        <Square aria-hidden="true" />
+                                                    </span>
+                                                </Button>
+                                            ) : (
+                                                <Button
+                                                    type="submit"
+                                                    variant="ghost"
+                                                    size="icon-lg"
+                                                    className="rounded-full p-1.5 hover:bg-transparent"
+                                                    disabled={
+                                                        !draft.trim() ||
+                                                        loadingHistory ||
+                                                        resolvingAgent ||
+                                                        resolvingConversation ||
+                                                        staleAnswer ||
+                                                        !chatStatus?.configured
+                                                    }
+                                                    aria-label={pendingQuestion ? '发送答案' : '发送任务'}
+                                                >
+                                                    <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground group-hover/button:bg-primary/90">
+                                                        <ArrowUp aria-hidden="true" />
+                                                    </span>
+                                                </Button>
+                                            )}
+                                        </div>
+                                    </form>
+                                </CardContent>
+                            </Card>
+                            <p className="mt-2 text-xs text-muted-foreground" role="status" aria-live="polite">
                                 {loadingHistory
                                     ? '正在连接聊天服务…'
                                     : generation
                                       ? generation.stopping
                                           ? '正在保存已生成的回答…'
-                                          : 'DeepSeek 正在生成回答'
-                                      : chatStatus?.configured
-                                        ? `${model} · ${chatStatus.storage === 'memory' ? '临时对话，重启服务后清除' : '对话自动保存'}`
-                                        : 'DeepSeek 尚未配置'}
-                            </div>
+                                          : '正在生成回答'
+                                      : backgroundRequestId
+                                        ? 'Agent 正在后台执行，结果将自动更新'
+                                        : pendingQuestion
+                                          ? '回答后继续'
+                                          : chatStatus?.configured
+                                            ? `${model} · 对话自动保存`
+                                            : '尚未配置模型'}
+                            </p>
                             {chatStatus && !chatStatus.configured && !chatError && (
-                                <div className="chat-feedback" role="alert">
-                                    <p>请在服务端设置 DEEPSEEK_API_KEY，再重新检查连接。</p>
-                                    <button className="text-button" type="button" onClick={reloadHistory} disabled={loadingHistory}>
-                                        重新检查
-                                    </button>
-                                </div>
+                                <FeedbackMessage variant="warning" className="mt-3">
+                                    <p>请先到账户设置添加模型连接，再重新检查连接。</p>
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                        <Button variant="outline" nativeButton={false} render={<Link href="/account#models" />}>
+                                            配置我的模型
+                                        </Button>
+                                        <Button variant="outline" onClick={reloadHistory} disabled={loadingHistory}>
+                                            重新检查
+                                        </Button>
+                                    </div>
+                                </FeedbackMessage>
                             )}
                             {chatError && (
-                                <div className="chat-feedback" role="alert">
+                                <FeedbackMessage variant="error" className="mt-3">
                                     <p>{chatError}</p>
-                                    <div className="chat-feedback-actions">
+                                    <div className="mt-2 flex flex-wrap gap-2">
                                         {retryTurn && (
-                                            <button
-                                                className="text-button"
-                                                type="button"
+                                            <Button
+                                                variant="outline"
                                                 disabled={Boolean(generation)}
                                                 onClick={() => sendMessage(retryTurn.content, retryTurn)}
                                             >
                                                 重试这条消息
-                                            </button>
+                                            </Button>
                                         )}
-                                        <button
-                                            className="text-button"
-                                            type="button"
-                                            onClick={reloadHistory}
-                                            disabled={loadingHistory || Boolean(generation)}
-                                        >
+                                        <Button variant="outline" onClick={reloadHistory} disabled={loadingHistory || Boolean(generation)}>
                                             重新连接
-                                        </button>
+                                        </Button>
                                     </div>
-                                </div>
+                                </FeedbackMessage>
+                            )}
+                            {generation && generation.conversationId !== activeId && (
+                                <FeedbackMessage variant="info" className="mt-3">
+                                    另一段对话正在生成回答。点击停止按钮后可发送新任务。
+                                </FeedbackMessage>
                             )}
                         </div>
-                        {generation && generation.conversationId !== activeId && (
-                            <p className="generation-note">另一段对话正在生成回答。点击停止按钮后可发送新任务。</p>
-                        )}
-                    </div>
-                    {!hasMessages && (
-                        <div className="home-continuation">
-                            <section className="resume-work" aria-labelledby="resume-heading">
-                                <div className="resume-heading">
-                                    <h2 id="resume-heading" className="home-section-label">
+                        {!hasMessages && (
+                            <section className="home-continuation" aria-labelledby="resume-heading">
+                                <div className="mb-3 flex items-center justify-between gap-2">
+                                    <h2 id="resume-heading" className="font-medium">
                                         最近对话
                                     </h2>
-                                    <button className="history-trigger" type="button" onClick={() => openModal('history')}>
-                                        全部对话 <ChevronRight size={14} aria-hidden="true" />
-                                    </button>
+                                    <Button variant="ghost" size="sm" onClick={() => openModal('history')}>
+                                        全部对话
+                                        <ChevronRight aria-hidden="true" />
+                                    </Button>
                                 </div>
-                                <div className="resume-list" aria-busy={loadingHistory}>
+                                <div className="grid gap-2" aria-busy={loadingHistory}>
                                     {!conversations.length && (
-                                        <p className="empty-message">
+                                        <p className="text-sm text-muted-foreground">
                                             {loadingHistory ? '正在载入历史对话…' : '还没有对话，发送一个问题开始吧。'}
                                         </p>
                                     )}
@@ -989,217 +1558,216 @@ export function Workspace({ children }: { children: ReactNode }) {
                                         .filter((item): item is Conversation => Boolean(item?.messages.length))
                                         .slice(0, 3)
                                         .map(item => (
-                                            <button
-                                                className="resume-row"
+                                            <Button
+                                                variant="ghost"
+                                                className="conversation-row"
                                                 key={item.id}
                                                 title={item.title}
                                                 onClick={() => selectConversation(item.id)}
                                             >
-                                                <span className="resume-title">{item.title}</span>
-                                                <ChevronRight className="resume-arrow" size={14} aria-hidden="true" />
-                                                <span className="resume-meta">
-                                                    <span className="resume-project">{item.agent?.name ?? '通用助手'}</span>
-                                                    <time className="resume-date" dateTime={item.updatedAt}>
-                                                        {item.updatedAt
-                                                            ? new Intl.DateTimeFormat('zh-CN', {
-                                                                  month: 'long',
-                                                                  day: 'numeric',
-                                                                  timeZone: 'Asia/Shanghai',
-                                                              }).format(new Date(item.updatedAt))
-                                                            : ''}
-                                                    </time>
+                                                <span className="truncate">{item.title}</span>
+                                                <span className="shrink-0 text-xs text-muted-foreground">
+                                                    {item.agent?.name ?? '通用助手'}
                                                 </span>
-                                            </button>
+                                            </Button>
                                         ))}
                                 </div>
                             </section>
+                        )}
+                    </section>
+                ) : (
+                    <div className="route-content">{children}</div>
+                )}
+            </SidebarInset>
+            <nav className="mobile-nav" aria-label="应用导航">
+                <Button
+                    variant={isHome && !activeId && !requestedConversationId && !projectFolderId ? 'secondary' : 'ghost'}
+                    onClick={startNewConversation}
+                    disabled={startingConversation}
+                    className="h-auto min-w-0 flex-1 flex-col gap-1 px-1 py-2 text-xs"
+                >
+                    <WorkspaceNavigationLabel
+                        label="开始新对话"
+                        icon={SquarePen}
+                        pending={startingConversation}
+                        pendingLabel="正在打开新对话…"
+                    />
+                </Button>
+                {['/rag', '/agents', '/templates', '/inbox']
+                    .map(href => navigation.find(item => item.href === href)!)
+                    .map(({ href, label, Icon, active }) => (
+                        <Button
+                            key={href}
+                            variant={active ? 'secondary' : 'ghost'}
+                            nativeButton={false}
+                            role="link"
+                            render={<Link href={href} />}
+                            aria-current={active ? 'page' : undefined}
+                            className="h-auto min-w-0 flex-1 flex-col gap-1 px-1 py-2 text-xs"
+                        >
+                            <WorkspaceNavigationContent label={label} icon={Icon} />
+                        </Button>
+                    ))}
+            </nav>
+            {isHome && projectFolderId && (
+                <ProjectFiles
+                    key={projectFolderId}
+                    projectFolderId={projectFolderId}
+                    projectName={projectName}
+                    open={projectFilesOpen}
+                    onOpenChange={setProjectFilesOpen}
+                    returnFocusRef={isMobile ? mobileProjectFilesRef : desktopProjectFilesRef}
+                />
+            )}
+            <Dialog open={modalOpen} onOpenChange={setModalOpen}>
+                <DialogContent className="max-h-[85dvh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle>{modalTitles[modalKind]}</DialogTitle>
+                        <DialogDescription>个人工作区</DialogDescription>
+                    </DialogHeader>
+                    {modalKind === 'starters' && (
+                        <div className="grid gap-2">
+                            {starters.map(({ title, detail, prompt }) => (
+                                <Button
+                                    variant="outline"
+                                    className="h-auto justify-between whitespace-normal py-3 text-left"
+                                    key={title}
+                                    aria-label={`${title}：${detail}，填入输入框`}
+                                    onClick={() => {
+                                        setDraft(prompt)
+                                        setModalOpen(false)
+                                        window.setTimeout(() => inputRef.current?.focus(), 0)
+                                    }}
+                                >
+                                    {title}
+                                    <ArrowUp aria-hidden="true" />
+                                </Button>
+                            ))}
                         </div>
                     )}
-                </section>
-                {!isHome && <div className="route-content">{children}</div>}
-            </main>
-            <nav className="mobile-nav" aria-label="应用导航">
-                <Link href="/" aria-current={isHome ? 'page' : undefined} className={isHome ? 'active' : ''}>
-                    <Home size={22} />
-                    <span>工作台</span>
-                </Link>
-                <Link href="/rag" aria-current={pathname === '/rag' ? 'page' : undefined} className={pathname === '/rag' ? 'active' : ''}>
-                    <Folder size={22} />
-                    <span>资料库</span>
-                </Link>
-                <Link
-                    href="/agents"
-                    aria-current={pathname === '/agents' ? 'page' : undefined}
-                    className={pathname === '/agents' ? 'active' : ''}
-                >
-                    <Bot size={22} />
-                    <span>Agents</span>
-                </Link>
-                <Link href="/projects" aria-current={isProjects ? 'page' : undefined} className={isProjects ? 'active' : ''}>
-                    <Folder size={22} />
-                    <span>项目</span>
-                </Link>
-                <Link href="/inbox" aria-current={isTasks ? 'page' : undefined} className={isTasks ? 'active' : ''}>
-                    <Inbox size={22} />
-                    <span>任务</span>
-                </Link>
-            </nav>
-            <dialog ref={drawerRef} className="navigation-dialog" aria-label="工作区导航">
-                {sidebarContent(true)}
-            </dialog>
-            <dialog ref={modalRef} className="resource-dialog workspace-dialog" aria-labelledby="workspace-dialog-title">
-                <div className="dialog-heading">
-                    <h2 id="workspace-dialog-title">{modalTitles[modalKind]}</h2>
-                    <button className="icon-button dialog-close" aria-label="关闭对话框" onClick={() => modalRef.current?.close()}>
-                        <X size={19} />
-                    </button>
-                </div>
-                {modalKind === 'more' && (
-                    <div className="more-menu">
-                        <Link className="sidebar-utility" href="/components" onClick={() => modalRef.current?.close()}>
-                            <Grid2X2 size={18} />
-                            <span>组件展示</span>
-                            <ChevronRight size={16} />
-                        </Link>
-                        <button className="sidebar-utility" onClick={() => setModalKind('plugins')}>
-                            <Layers size={18} />
-                            <span>插件与能力</span>
-                            <ChevronRight size={16} />
-                        </button>
-                        <button className="sidebar-utility" onClick={() => setModalKind('help')}>
-                            <CircleHelp size={18} />
-                            <span>使用帮助</span>
-                            <ChevronRight size={16} />
-                        </button>
-                    </div>
-                )}
-                {modalKind === 'starters' && (
-                    <div className="starter-grid" aria-label="工作起点">
-                        {starters.map(({ title, detail, prompt }) => (
-                            <button
-                                className="starter-card"
-                                aria-label={title + '：' + detail + '，填入输入框'}
-                                key={title}
-                                onClick={() => {
-                                    setDraft(prompt)
-                                    modalRef.current?.close()
-                                    inputRef.current?.focus()
-                                }}
-                            >
-                                {title}
-                                <ArrowUp size={16} aria-hidden="true" />
-                            </button>
-                        ))}
-                    </div>
-                )}
-                {modalKind === 'history' && (
-                    <div className="history-list" aria-busy={loadingHistory}>
-                        {!conversations.length && (
-                            <p className="empty-message">{loadingHistory ? '正在载入历史对话…' : '还没有保存的对话。'}</p>
-                        )}
-                        {conversations.map(item => (
-                            <button
-                                className="history-row"
-                                key={item.id}
-                                aria-label={`${item.title}，${item.agent?.name ?? '通用助手'}${item.unread ? '，未读消息' : ''}`}
-                                onClick={() => {
-                                    modalRef.current?.close()
-                                    selectConversation(item.id)
-                                    window.setTimeout(() => inputRef.current?.focus(), 0)
-                                }}
-                            >
-                                <span className="history-label">
-                                    <strong>{item.title}</strong>
-                                    <small>{item.agent?.name ?? '通用助手'}</small>
-                                </span>
-                                {item.unread && <span className="conversation-unread" aria-hidden="true" />}
-                                <ChevronRight size={16} aria-hidden="true" />
-                            </button>
-                        ))}
-                    </div>
-                )}
-                {modalKind === 'workspace' && (
-                    <>
-                        <p className="dialog-description">管理项目、对话与资料。</p>
-                        <div className="workspace-summary">
-                            <OrbitMark />
-                            <div>
-                                <strong>个人工作区</strong>
-                                <span>项目、对话与资料，放在一起。</span>
-                            </div>
-                        </div>
-                    </>
-                )}
-                {modalKind === 'files' && (
-                    <>
-                        <p className="dialog-description">资料上下文尚未接入当前聊天。</p>
-                        <p className="dialog-note">当前 DeepSeek 对话使用你输入的文字与该对话的历史消息。你可以直接粘贴需要讨论的内容。</p>
-                        <Link className="action-button" href="/rag" onClick={() => modalRef.current?.close()}>
-                            前往资料库
-                            <ArrowRight size={16} />
-                        </Link>
-                    </>
-                )}
-                {modalKind === 'plugins' && (
-                    <>
-                        <p className="dialog-description">当前对话已接入 DeepSeek。</p>
-                        <div className="capability-note">
-                            <Layers size={20} />
-                            <span>网页阅读与其他插件尚未接入，当前聊天使用文字与历史消息。</span>
-                        </div>
-                    </>
-                )}
-                {modalKind === 'settings' && (
-                    <>
-                        <p className="dialog-description">选择助手与对话使用的资料。</p>
-                        <div className="setting-row">
-                            <span>
-                                <strong>当前助手</strong>
-                                <span>选择适合当前工作的助手</span>
-                            </span>
-                            <div className="select-control">
-                                <select
-                                    aria-label="设置助手"
-                                    value={activeConversation?.agentId ?? selectedAgentId}
-                                    onChange={event => selectAgent(event.target.value)}
+                    {modalKind === 'history' && (
+                        <div className="grid gap-2" aria-busy={loadingHistory}>
+                            {!conversations.length && (
+                                <p className="text-sm text-muted-foreground">
+                                    {loadingHistory ? '正在载入历史对话…' : '还没有保存的对话。'}
+                                </p>
+                            )}
+                            {orderedConversations.map(item => (
+                                <Button
+                                    variant="ghost"
+                                    className="h-auto justify-between py-3"
+                                    key={item.id}
+                                    onClick={() => {
+                                        setModalOpen(false)
+                                        selectConversation(item.id)
+                                    }}
+                                    aria-label={`${item.title}，${item.agent?.name ?? '通用助手'}`}
                                 >
-                                    <option value="">通用助手</option>
-                                    {agents.map(profile => (
-                                        <option value={profile.id} key={profile.id}>
-                                            {profile.name}
-                                        </option>
-                                    ))}
-                                </select>
-                                <ChevronDown size={14} aria-hidden="true" />
-                            </div>
+                                    <span className="truncate">{item.title}</span>
+                                    <ChevronRight aria-hidden="true" />
+                                </Button>
+                            ))}
                         </div>
-                        <p className="dialog-note">当前模型：{model}。切换助手会开始一段新对话。</p>
-                        <Link className="action-button" href="/agents" onClick={() => modalRef.current?.close()}>
-                            创建或编辑 Agent
-                            <ArrowRight size={16} />
-                        </Link>
-                    </>
-                )}
-                {modalKind === 'help' && (
-                    <>
-                        <p className="dialog-description">把任务写下来，让工作有一个起点。</p>
-                        <ol className="help-list">
-                            <li>描述目标，或选择一个起步灵感。</li>
-                            <li>发送任务，查看回答并继续讨论。</li>
-                            <li>在资料库和任务页继续整理工作。</li>
-                        </ol>
-                        <p className="dialog-note">Enter 发送 · Shift + Enter 换行。</p>
-                    </>
-                )}
-            </dialog>
-            <div className={`toast ${notice ? 'visible' : ''}`} role="status">
-                {notice && (
-                    <>
-                        <Check size={15} />
-                        {notice}
-                    </>
-                )}
-            </div>
+                    )}
+                    {modalKind === 'workspace' && (
+                        <div className="grid gap-3">
+                            <OrbitMark />
+                            <p>个人工作区：项目、对话与资料，放在一起。</p>
+                        </div>
+                    )}
+                    {modalKind === 'files' && (
+                        <div className="grid gap-3">
+                            <p>资料上下文尚未接入当前聊天。</p>
+                            <p className="text-sm text-muted-foreground">
+                                当前对话使用输入的文字与该对话的历史消息。你可以直接粘贴需要讨论的内容。
+                            </p>
+                            <Button nativeButton={false} render={<Link href="/rag" />} onClick={() => setModalOpen(false)}>
+                                前往资料库
+                                <ArrowRight aria-hidden="true" />
+                            </Button>
+                        </div>
+                    )}
+                    {modalKind === 'plugins' && (
+                        <FeedbackMessage variant="info">
+                            当前已接入模型对话。网页阅读与其他插件尚未接入，聊天使用文字与历史消息。
+                        </FeedbackMessage>
+                    )}
+                    {modalKind === 'settings' && (
+                        <div className="grid gap-3">
+                            <Label htmlFor="workspace-agent">当前助手</Label>
+                            <NativeSelect
+                                id="workspace-agent"
+                                value={activeConversation?.agentId ?? selectedAgentId}
+                                onChange={event => selectAgent(event.target.value)}
+                            >
+                                <NativeSelectOption value="">通用助手</NativeSelectOption>
+                                {agents.map(profile => (
+                                    <NativeSelectOption value={profile.id} key={profile.id}>
+                                        {profile.name}
+                                    </NativeSelectOption>
+                                ))}
+                            </NativeSelect>
+                            <p className="text-sm text-muted-foreground">当前模型：{model}。切换助手会开始一段新对话。</p>
+                            <Button
+                                variant="outline"
+                                nativeButton={false}
+                                render={<Link href="/agents" />}
+                                onClick={() => setModalOpen(false)}
+                            >
+                                创建或编辑 Agent
+                            </Button>
+                        </div>
+                    )}
+                    {modalKind === 'help' && (
+                        <div className="grid gap-3">
+                            <ol className="list-decimal space-y-2 pl-5">
+                                <li>描述目标，或选择一个示例问题。</li>
+                                <li>发送任务，查看回答并继续讨论。</li>
+                                <li>在资料库和任务页继续整理工作。</li>
+                            </ol>
+                            <p className="text-sm text-muted-foreground">Enter 发送 · Shift + Enter 换行。</p>
+                            <p className="text-xs text-muted-foreground">
+                                界面字体：
+                                <a
+                                    href="https://hyperos.mi.com/font/zh/"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline underline-offset-4"
+                                >
+                                    MiSans · 小米
+                                </a>
+                                {' · '}
+                                <a
+                                    href="/fonts/MiSans-license.pdf"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline underline-offset-4"
+                                >
+                                    字体许可
+                                </a>
+                            </p>
+                        </div>
+                    )}
+                </DialogContent>
+            </Dialog>
+            {notice && (
+                <FeedbackToast variant={notice === '回答已复制' ? 'success' : 'error'} onDismiss={() => setNotice('')}>
+                    {notice}
+                </FeedbackToast>
+            )}
         </div>
+    )
+}
+
+/**
+ * Supplies the official responsive sidebar controls to the persisted chat workspace.
+ * @param props - Authenticated route content.
+ * @returns The shared shadcn sidebar and workspace.
+ */
+export function Workspace({ children }: { children: ReactNode }) {
+    return (
+        <SidebarProvider>
+            <WorkspaceContent>{children}</WorkspaceContent>
+        </SidebarProvider>
     )
 }

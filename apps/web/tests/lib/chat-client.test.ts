@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatConversation, ChatStreamEvent } from '@ai-harness/contracts'
 import {
     cancelConversation,
+    decideHumanRequest,
+    deleteConversation,
     createConversation,
     getChatStatus,
     listConversations,
@@ -56,6 +58,35 @@ afterEach(() => {
 })
 
 describe('chat client', () => {
+    it('deletes only the selected chat and requires its matching durable receipt', async () => {
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce(Response.json({ id: conversationId, deleted: true }))
+            .mockResolvedValueOnce(Response.json({ id: requestId, deleted: true }))
+        vi.stubGlobal('fetch', fetchMock)
+        await deleteConversation(conversationId)
+        expect(fetchMock.mock.calls[0]![0]).toBe(`/api/chat/conversations/${conversationId}`)
+        expect(fetchMock.mock.calls[0]![1].method).toBe('DELETE')
+        await expect(deleteConversation(conversationId)).rejects.toThrow('未能确认对话删除结果')
+    })
+    it('binds a bottom-composer answer to the exact persisted question without granting approval', async () => {
+        const humanResponse = { requestId: 'e8acbd9e-613f-4dd6-aab4-ffb5ce2fa3bf', version: 3 }
+        const fetchMock = vi.fn().mockResolvedValue(eventResponse([encodeEvents({ type: 'done', conversation })]))
+        vi.stubGlobal('fetch', fetchMock)
+        await streamMessage(conversationId, '确认', requestId, vi.fn(), new AbortController().signal, [], humanResponse)
+        expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual({ content: '确认', requestId, humanResponse })
+    })
+
+    it('submits only a dedicated action identity and saved version for a human decision', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(Response.json(conversation))
+        vi.stubGlobal('fetch', fetchMock)
+        const humanRequestId = 'e8acbd9e-613f-4dd6-aab4-ffb5ce2fa3bf'
+        const action = { actionId: requestId, version: 2, decision: 'approve' as const }
+        expect(await decideHumanRequest(conversationId, humanRequestId, action)).toEqual(conversation)
+        expect(fetchMock.mock.calls[0]![0]).toBe(`/api/chat/conversations/${conversationId}/human-requests/${humanRequestId}/decisions`)
+        expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual(action)
+    })
+
     it('decodes split UTF-8 characters, multiple frames, and reasoning without losing text', async () => {
         const events: ChatStreamEvent[] = [
             { type: 'start', conversationId, requestId },
