@@ -17,6 +17,31 @@ import {
     type TemplateInput,
 } from '@ai-harness/contracts'
 import pg from 'pg'
+import { createPostgresProjectFolderStore, initializeProjectFolderTables, type ProjectFolderStore } from './project-folders.js'
+import { cleanupLegacyProjects } from './legacy-project-cleanup.js'
+import { deletePostgresConversation, initializeConversationDeletion } from './conversation-deletion.js'
+import { createMemoryAccountStore, createPostgresAccountStore, initializeAccountTables, type AccountStore } from './accounts.js'
+import { createPostgresKnowledgeStore, initializeKnowledgeTables, type KnowledgeStore } from './knowledge.js'
+import { createPostgresEmbeddingStore, initializeEmbeddingTables, type EmbeddingStore } from './embeddings.js'
+import {
+    createPostgresCollaborationStore,
+    initializeCollaborationTables,
+    lockProjectIdentity,
+    CollaborationConflictError,
+    type CollaborationStore,
+} from './collaboration.js'
+import { createPostgresWorkspaceStore, workspaceAccess, type WorkspaceStore } from './workspaces.js'
+import { createPostgresSkillStore, initializeSkillTables, SkillAccessError, type SkillStore } from './skills.js'
+export * from './accounts.js'
+export * from './knowledge.js'
+export * from './embeddings.js'
+export * from './collaboration.js'
+export * from './workspaces.js'
+export * from './skills.js'
+export * from './project-folders.js'
+export * from './legacy-project-cleanup.js'
+
+export class ConversationCreationConflictError extends Error {}
 
 export interface ChatScope {
     userId: string
@@ -24,6 +49,22 @@ export interface ChatScope {
 }
 
 export interface ChatStore {
+    projectFolders?: ProjectFolderStore
+    /**
+     * Inserts an immutable conversation creation action without overwriting an earlier result.
+     * @param scope - Authenticated account and workspace.
+     * @param conversation - New complete ordinary conversation.
+     * @param input - Original normalized creation parameters, retained for matching retries.
+     * @returns The new or matching persisted conversation.
+     * @throws Error for mismatched actions, invalid project ownership or storage failure.
+     */
+    create?(scope: ChatScope, conversation: ChatConversation, input: Record<string, string>): Promise<ChatConversation>
+    skills?: SkillStore
+    workspaces?: WorkspaceStore
+    collaboration?: CollaborationStore
+    embeddings?: EmbeddingStore
+    knowledge?: KnowledgeStore
+    accounts?: AccountStore
     agents?: AgentStore
     projects?: ProjectStore
     templates?: ProjectTemplateStore
@@ -51,6 +92,14 @@ export interface ChatStore {
      * @throws Error when the scope is missing or storage is unavailable.
      */
     get(scope: ChatScope, id: string): Promise<ChatConversation | undefined>
+    /**
+     * Permanently deletes one owned ordinary conversation and fences its old writers.
+     * @param scope - Authenticated owner and current workspace.
+     * @param id - Ordinary conversation identity.
+     * @returns Whether the conversation was deleted by this scope, including matching retries.
+     * @throws Error for unavailable authorization or storage.
+     */
+    remove?(scope: ChatScope, id: string): Promise<boolean>
     /**
      * Replaces a conversation snapshot within the authenticated scope.
      * @param scope - Authenticated user and workspace context.
@@ -192,7 +241,6 @@ export class TemplateConflictError extends Error {
 
 export interface ChatStoreOptions {
     databaseUrl?: string
-    allowMemory?: boolean
 }
 
 interface ConversationRow {
@@ -204,6 +252,8 @@ interface ConversationRow {
     active_request_id: string | null
     agent_definition?: unknown
     task_data?: unknown
+    project_folder_id?: string | null
+    creation_input?: Record<string, string> | null
 }
 
 interface AgentRow {
@@ -397,16 +447,18 @@ function conversationParameters(scope: ChatScope, snapshot: ChatConversation): u
 }
 
 /**
- * Creates an explicit, process-local store for development and tests.
+ * Creates an isolated fake for tests that explicitly inject their own persistence.
  * @returns A scoped store whose records are lost when the process exits.
  */
-function createMemoryStore(): ChatStore {
+export function createMemoryChatStore(): ChatStore {
     let conversations = new Map<string, { scope: ChatScope; conversation: ChatConversation }>()
+    const deletedConversations = new Set<string>()
     const agents = new Map<string, { scope: ChatScope; agent: AgentDefinition }>()
     let projects = new Map<string, { scope: ChatScope; record: StoredProject }>()
     const templates = new Map<string, { scope: ChatScope; record: StoredProjectTemplate }>()
     let launches = new Map<string, { scope: ChatScope; launch: StoredTemplateLaunch }>()
     return {
+        accounts: createMemoryAccountStore(),
         templates: {
             /**
              * Lists independent template snapshots owned by the complete trusted scope.
@@ -604,6 +656,21 @@ function createMemoryStore(): ChatStore {
             return conversation ? structuredClone(conversation) : undefined
         },
         /**
+         * Mirrors the durable deletion identity barrier in an explicitly injected test fake.
+         * @param scope - Test's trusted account and workspace.
+         * @param id - Ordinary conversation to remove.
+         * @returns Whether this exact owner removed the chat, including matching retries.
+         */
+        async remove(scope, id) {
+            const key = memoryKey(scope, id)
+            if (deletedConversations.has(key)) return true
+            const current = conversations.get(key)
+            if (!current || current.conversation.task) return false
+            conversations.delete(key)
+            deletedConversations.add(key)
+            return true
+        },
+        /**
          * Validates and saves an independent snapshot under its ownership key.
          * @param scope - Authenticated user and workspace context.
          * @param conversation - Complete conversation snapshot.
@@ -613,6 +680,7 @@ function createMemoryStore(): ChatStore {
         async save(scope, conversation) {
             const key = memoryKey(scope, conversation.id)
             const snapshot = validateConversation(conversation)
+            if (deletedConversations.has(key)) throw new Error('Conversation was deleted.')
             conversations.set(key, { scope: { ...scope }, conversation: structuredClone(snapshot) })
         },
         /**
@@ -621,6 +689,7 @@ function createMemoryStore(): ChatStore {
          */
         async close() {
             conversations.clear()
+            deletedConversations.clear()
             agents.clear()
             projects.clear()
             templates.clear()
@@ -653,6 +722,7 @@ function conversationFromRow(row: ConversationRow): ChatConversation {
         createdAt: timestamp(row.created_at),
         updatedAt: timestamp(row.updated_at),
         messages: row.messages,
+        ...(row.project_folder_id ? { projectFolderId: row.project_folder_id } : {}),
         ...(row.active_request_id ? { activeRequestId: row.active_request_id } : {}),
         ...(agent ? { agentId: agent.id, agent } : {}),
         ...(row.task_data !== null && row.task_data !== undefined ? { task: row.task_data } : {}),
@@ -665,7 +735,7 @@ function conversationFromRow(row: ConversationRow): ChatConversation {
  * @returns A promise that resolves when the table is available.
  * @throws Error when PostgreSQL cannot initialize the conversation table.
  */
-async function initializePostgres(pool: pg.Pool): Promise<void> {
+async function initializePostgresTables(pool: Pick<pg.Pool, 'query'>): Promise<boolean> {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS harness_chat_conversations (
             workspace_id text NOT NULL,
@@ -682,6 +752,9 @@ async function initializePostgres(pool: pg.Pool): Promise<void> {
     await pool.query('ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS active_request_id text')
     await pool.query('ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS agent_definition jsonb')
     await pool.query('ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS task_data jsonb')
+    await pool.query('ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS project_folder_id uuid')
+    await pool.query('ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS creation_input jsonb')
+    await initializeConversationDeletion(pool)
     await pool.query(`
         CREATE TABLE IF NOT EXISTS harness_agent_definitions (
             workspace_id text NOT NULL,
@@ -718,6 +791,41 @@ async function initializePostgres(pool: pg.Pool): Promise<void> {
             PRIMARY KEY (workspace_id, user_id, id)
         )
     `)
+    await initializeAccountTables(pool)
+    await initializeSkillTables(pool)
+    await initializeProjectFolderTables(pool)
+    await initializeKnowledgeTables(pool)
+    await initializeCollaborationTables(pool)
+    const vectors = await initializeEmbeddingTables(pool)
+    await cleanupLegacyProjects(pool)
+    return vectors
+}
+
+/**
+ * Serializes transactional schema initialization across independent API processes.
+ * @param pool - Shared application PostgreSQL pool.
+ * @returns After every table and additive column has committed together.
+ * @throws Error after rolling back a failed initialization and releasing its client.
+ */
+async function initializePostgres(pool: pg.Pool): Promise<boolean> {
+    const client = await pool.connect()
+    try {
+        await client.query('BEGIN')
+        // This database-wide key coordinates all harness schema initializers, including fresh processes.
+        await client.query('SELECT pg_advisory_xact_lock(186821, 5005)')
+        const vectorAvailable = await initializePostgresTables(client)
+        await client.query('COMMIT')
+        return vectorAvailable
+    } catch (error) {
+        try {
+            await client.query('ROLLBACK')
+        } catch {
+            /* Preserve the initialization failure. */
+        }
+        throw error
+    } finally {
+        client.release()
+    }
 }
 
 /**
@@ -737,7 +845,7 @@ function createPostgresTemplateStore(pool: pg.Pool): ProjectTemplateStore {
             validateScope(scope)
             const result = await pool.query<ProjectRow>(
                 `SELECT data FROM harness_project_templates
-                 WHERE workspace_id = $1 AND user_id = $2
+                 WHERE workspace_id = $1 AND user_id = $2 AND COALESCE(data->>'kind','personal')='personal'
                  ORDER BY data->'template'->>'updatedAt' DESC, id ASC`,
                 [scope.workspaceId, scope.userId]
             )
@@ -757,6 +865,8 @@ function createPostgresTemplateStore(pool: pg.Pool): ProjectTemplateStore {
                  WHERE workspace_id = $1 AND user_id = $2 AND id = $3`,
                 [scope.workspaceId, scope.userId, id]
             )
+            if ((result.rows[0]?.data as { kind?: string } | undefined)?.kind === 'workflow')
+                throw new TemplateConflictError('该模板属于协作流程，请使用协作模板入口。')
             return result.rows[0] ? validateTemplate(result.rows[0].data) : undefined
         },
         /**
@@ -784,7 +894,7 @@ function createPostgresTemplateStore(pool: pg.Pool): ProjectTemplateStore {
                         `UPDATE harness_project_templates
                          SET data = jsonb_set($4::jsonb, '{creation}', data->'creation')
                          WHERE workspace_id = $1 AND user_id = $2 AND id = $3
-                         AND (data->'template'->>'version')::integer = $5
+                         AND (data->'template'->>'version')::integer = $5 AND COALESCE(data->>'kind','personal')='personal'
                          RETURNING id`,
                         [scope.workspaceId, scope.userId, snapshot.template.id, JSON.stringify(snapshot), expectedVersion]
                     )
@@ -828,9 +938,11 @@ async function instantiatePostgresTemplateProject(pool: pg.Pool, scope: ChatScop
     const client = await pool.connect()
     try {
         await client.query('BEGIN')
+        const shared = await lockProjectIdentity(client, scope, snapshot.project.project.id)
+        if (shared.exists) throw new TemplateConflictError('该项目标识已属于协作项目。')
         const result = await client.query<ProjectRow>(
             `SELECT data FROM harness_project_templates
-             WHERE workspace_id = $1 AND user_id = $2 AND id = $3 FOR SHARE`,
+             WHERE workspace_id = $1 AND user_id = $2 AND id = $3 AND COALESCE(data->>'kind','personal')='personal' FOR SHARE`,
             [scope.workspaceId, scope.userId, snapshot.launch.templateId]
         )
         const current = result.rows[0] ? validateTemplate(result.rows[0].data) : undefined
@@ -872,6 +984,14 @@ async function instantiatePostgresTemplateProject(pool: pg.Pool, scope: ChatScop
  * @returns Scoped project storage with the parent store's lifecycle.
  */
 function createPostgresProjectStore(pool: pg.Pool): ProjectStore {
+    const visibleProjects = `SELECT CASE WHEN shared.project IS NULL THEN p.data ELSE jsonb_set(p.data,'{project}',
+        p.data->'project'||jsonb_build_object('name',shared.project->>'name','description',shared.project->>'description',
+        'updatedAt',shared.project->>'updatedAt')) END AS data
+        FROM harness_personal_projects p LEFT JOIN harness_collaboration_state s ON s.workspace_id=p.workspace_id
+        LEFT JOIN LATERAL (SELECT s.data->'projects'->(p.id::text) AS project) shared ON true
+        WHERE p.workspace_id=$1 AND p.user_id=$2 AND (shared.project IS NULL OR EXISTS (
+        SELECT 1 FROM jsonb_array_elements(shared.project->'members') member
+        WHERE member->>'id'=$2 AND member->>'status' IN ('active','pending')))`
     return {
         /**
          * Lists project records using both trusted ownership predicates.
@@ -882,9 +1002,7 @@ function createPostgresProjectStore(pool: pg.Pool): ProjectStore {
         async list(scope) {
             validateScope(scope)
             const result = await pool.query<ProjectRow>(
-                `SELECT data FROM harness_personal_projects
-                 WHERE workspace_id = $1 AND user_id = $2
-                 ORDER BY data->'project'->>'updatedAt' DESC, id ASC`,
+                `${visibleProjects} ORDER BY COALESCE(shared.project->>'updatedAt',p.data->'project'->>'updatedAt') DESC,p.id ASC`,
                 [scope.workspaceId, scope.userId]
             )
             return result.rows.map(row => validateProject(row.data))
@@ -898,30 +1016,76 @@ function createPostgresProjectStore(pool: pg.Pool): ProjectStore {
          */
         async get(scope, id) {
             validateScope(scope)
-            const result = await pool.query<ProjectRow>(
-                `SELECT data FROM harness_personal_projects
-                 WHERE workspace_id = $1 AND user_id = $2 AND id = $3`,
-                [scope.workspaceId, scope.userId, id]
-            )
+            const result = await pool.query<ProjectRow>(`${visibleProjects} AND p.id=$3`, [scope.workspaceId, scope.userId, id])
             return result.rows[0] ? validateProject(result.rows[0].data) : undefined
         },
         /**
-         * Replaces current project and creation input in one scoped statement.
+         * Replaces a private project while arbitrating against the shared project identity.
          * @param scope - Authenticated ownership context.
          * @param record - Complete current project and original creation input.
          * @returns After PostgreSQL accepts the validated record.
+         * @throws CollaborationConflictError when the identity is already shared.
          * @throws Error for missing ownership, invalid record data, or query failure.
          */
         async save(scope, record) {
             validateScope(scope)
             const snapshot = validateProject(record)
-            await pool.query(
-                `INSERT INTO harness_personal_projects (workspace_id, user_id, id, data)
-                 VALUES ($1, $2, $3, $4::jsonb)
-                 ON CONFLICT (workspace_id, user_id, id) DO UPDATE SET data = EXCLUDED.data`,
-                [scope.workspaceId, scope.userId, snapshot.project.id, JSON.stringify(snapshot)]
-            )
+            const client = await pool.connect()
+            try {
+                await client.query('BEGIN')
+                const shared = await lockProjectIdentity(client, scope, snapshot.project.id)
+                if (shared.exists) throw new CollaborationConflictError('请在协作项目中编辑共享信息。')
+                await client.query(
+                    `INSERT INTO harness_personal_projects (workspace_id, user_id, id, data)
+                     VALUES ($1, $2, $3, $4::jsonb)
+                     ON CONFLICT (workspace_id, user_id, id) DO UPDATE SET data = EXCLUDED.data`,
+                    [scope.workspaceId, scope.userId, snapshot.project.id, JSON.stringify(snapshot)]
+                )
+                await client.query('COMMIT')
+            } catch (error) {
+                try {
+                    await client.query('ROLLBACK')
+                } catch {
+                    /* Preserve the original storage error. */
+                }
+                throw error
+            } finally {
+                client.release()
+            }
         },
+    }
+}
+
+/**
+ * Retains current managed-team membership through a complete private Agent read or write.
+ * @param pool - Shared application PostgreSQL pool.
+ * @param scope - Verified actual owner and selected workspace.
+ * @param action - Complete private Agent operation.
+ * @returns Its committed result while preserving historical account-free legacy test fixtures.
+ * @throws SkillAccessError after a managed-team membership has ended.
+ * @throws Error after rollback on a database failure.
+ */
+async function agentScope<T>(pool: pg.Pool, scope: ChatScope, action: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const client = await pool.connect()
+    try {
+        await client.query('BEGIN')
+        const workspace = await client.query<{ kind: string }>('SELECT kind FROM harness_workspaces WHERE id=$1 FOR KEY SHARE', [
+            scope.workspaceId,
+        ])
+        if (workspace.rows[0]?.kind === 'team' && !(await workspaceAccess(client, scope, true)))
+            throw new SkillAccessError('当前工作空间资格已变化。')
+        const result = await action(client)
+        await client.query('COMMIT')
+        return result
+    } catch (error) {
+        try {
+            await client.query('ROLLBACK')
+        } catch {
+            /* Preserve the original storage refusal. */
+        }
+        throw error
+    } finally {
+        client.release()
     }
 }
 
@@ -940,13 +1104,15 @@ function createPostgresAgentStore(pool: pg.Pool): AgentStore {
          */
         async list(scope) {
             validateScope(scope)
-            const result = await pool.query<AgentRow>(
-                `SELECT data FROM harness_agent_definitions
-                 WHERE workspace_id = $1 AND user_id = $2
-                 ORDER BY data->>'updatedAt' DESC, id ASC`,
-                [scope.workspaceId, scope.userId]
-            )
-            return result.rows.map(row => agentDefinitionSchema.parse(row.data))
+            return agentScope(pool, scope, async client => {
+                const result = await client.query<AgentRow>(
+                    `SELECT data FROM harness_agent_definitions
+                     WHERE workspace_id = $1 AND user_id = $2
+                     ORDER BY data->>'updatedAt' DESC, id ASC`,
+                    [scope.workspaceId, scope.userId]
+                )
+                return result.rows.map(row => agentDefinitionSchema.parse(row.data))
+            })
         },
         /**
          * Reads one agent constrained by its complete ownership tuple.
@@ -957,12 +1123,14 @@ function createPostgresAgentStore(pool: pg.Pool): AgentStore {
          */
         async get(scope, id) {
             validateScope(scope)
-            const result = await pool.query<AgentRow>(
-                `SELECT data FROM harness_agent_definitions
-                 WHERE workspace_id = $1 AND user_id = $2 AND id = $3`,
-                [scope.workspaceId, scope.userId, id]
-            )
-            return result.rows[0] ? agentDefinitionSchema.parse(result.rows[0].data) : undefined
+            return agentScope(pool, scope, async client => {
+                const result = await client.query<AgentRow>(
+                    `SELECT data FROM harness_agent_definitions
+                     WHERE workspace_id = $1 AND user_id = $2 AND id = $3`,
+                    [scope.workspaceId, scope.userId, id]
+                )
+                return result.rows[0] ? agentDefinitionSchema.parse(result.rows[0].data) : undefined
+            })
         },
         /**
          * Replaces an agent snapshot only within its trusted ownership tuple.
@@ -974,38 +1142,106 @@ function createPostgresAgentStore(pool: pg.Pool): AgentStore {
         async save(scope, agent) {
             validateScope(scope)
             const snapshot = agentDefinitionSchema.parse(agent)
-            await pool.query(
-                `INSERT INTO harness_agent_definitions (workspace_id, user_id, id, data)
-                 VALUES ($1, $2, $3, $4::jsonb)
-                 ON CONFLICT (workspace_id, user_id, id) DO UPDATE SET data = EXCLUDED.data`,
-                [scope.workspaceId, scope.userId, snapshot.id, JSON.stringify(snapshot)]
-            )
+            await agentScope(pool, scope, async client => {
+                await client.query(
+                    `INSERT INTO harness_agent_definitions (workspace_id, user_id, id, data)
+                     VALUES ($1, $2, $3, $4::jsonb)
+                     ON CONFLICT (workspace_id, user_id, id) DO UPDATE SET data = EXCLUDED.data`,
+                    [scope.workspaceId, scope.userId, snapshot.id, JSON.stringify(snapshot)]
+                )
+            })
         },
     }
 }
 
 /**
- * Opens a PostgreSQL-backed store, or explicit development memory storage.
- * @param options - Server-side database connection and memory opt-in settings.
+ * Opens the PostgreSQL-backed business store without a volatile fallback.
+ * @param options - Server-side persistent database connection settings.
  * @returns An initialized scoped conversation store.
  * @throws Error when durable storage is unconfigured or PostgreSQL initialization fails.
  */
 export async function createChatStore(options: ChatStoreOptions): Promise<ChatStore> {
     if (!options.databaseUrl?.trim()) {
-        if (options.allowMemory) return createMemoryStore()
-        throw new Error('Set DATABASE_URL for chat persistence, or explicitly set CHAT_STORE=memory for temporary development storage.')
+        throw new Error('Set DATABASE_URL for persistent PostgreSQL storage.')
     }
 
-    const pool = new pg.Pool({ connectionString: options.databaseUrl })
+    const pool = new pg.Pool({ connectionString: options.databaseUrl, connectionTimeoutMillis: 5000 })
+    /**
+     * Handles failed idle connections already evicted by the pool during database outages.
+     * @returns Nothing; active queries still reject and subsequent requests reconnect normally.
+     */
+    function handleIdleDatabaseError(): void {
+        // The pool removes the broken idle client before emitting this recoverable event.
+    }
+    pool.on('error', handleIdleDatabaseError)
+    let vectorAvailable: boolean
     try {
-        await initializePostgres(pool)
+        vectorAvailable = await initializePostgres(pool)
     } catch (error) {
         await pool.end()
         throw error
     }
 
     return {
+        /**
+         * Commits a new ordinary conversation and its immutable folder identity under a scoped action lock.
+         * @param scope - Verified owner and workspace.
+         * @param conversation - New conversation with a stable action-derived identifier.
+         * @param input - Normalized original creation parameters.
+         * @returns The new conversation or its current matching replay.
+         * @throws Error when ownership, replay parameters or persistence are invalid.
+         */
+        async create(scope, conversation, input) {
+            validateScope(scope)
+            const snapshot = validateConversation(conversation)
+            const client = await pool.connect()
+            try {
+                await client.query('BEGIN')
+                await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 21))', [
+                    JSON.stringify([scope.workspaceId, scope.userId, snapshot.id]),
+                ])
+                if (!(await workspaceAccess(client, scope, true))) throw new Error('Conversation workspace is unavailable.')
+                if (snapshot.projectFolderId) {
+                    const folder = await client.query(
+                        'SELECT id FROM harness_project_folders WHERE workspace_id=$1 AND user_id=$2 AND id=$3 FOR KEY SHARE',
+                        [scope.workspaceId, scope.userId, snapshot.projectFolderId]
+                    )
+                    if (!folder.rowCount) throw new Error('Conversation project is unavailable.')
+                }
+                const previous = await client.query<ConversationRow>(
+                    'SELECT * FROM harness_chat_conversations WHERE workspace_id=$1 AND user_id=$2 AND id=$3 FOR UPDATE',
+                    [scope.workspaceId, scope.userId, snapshot.id]
+                )
+                if (previous.rows[0]) {
+                    const original = previous.rows[0].creation_input
+                    if (!original || JSON.stringify(Object.entries(original).sort()) !== JSON.stringify(Object.entries(input).sort()))
+                        throw new ConversationCreationConflictError()
+                    await client.query('COMMIT')
+                    return conversationFromRow(previous.rows[0])
+                }
+                await client.query(
+                    `INSERT INTO harness_chat_conversations
+                    (workspace_id,user_id,id,title,created_at,updated_at,messages,active_request_id,agent_definition,task_data,project_folder_id,creation_input)
+                    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb)`,
+                    [...conversationParameters(scope, snapshot), snapshot.projectFolderId ?? null, JSON.stringify(input)]
+                )
+                await client.query('COMMIT')
+                return snapshot
+            } catch (error) {
+                await client.query('ROLLBACK').catch(() => undefined)
+                throw error
+            } finally {
+                client.release()
+            }
+        },
+        accounts: createPostgresAccountStore(pool),
+        workspaces: createPostgresWorkspaceStore(pool),
+        collaboration: createPostgresCollaborationStore(pool),
+        knowledge: createPostgresKnowledgeStore(pool),
+        embeddings: createPostgresEmbeddingStore(pool, vectorAvailable),
         agents: createPostgresAgentStore(pool),
+        skills: createPostgresSkillStore(pool),
+        projectFolders: createPostgresProjectFolderStore(pool),
         projects: createPostgresProjectStore(pool),
         templates: createPostgresTemplateStore(pool),
         /**
@@ -1028,7 +1264,7 @@ export async function createChatStore(options: ChatStoreOptions): Promise<ChatSt
         async list(scope) {
             validateScope(scope)
             const result = await pool.query<ConversationRow>(
-                `SELECT id, title, created_at, updated_at, messages, active_request_id, agent_definition, task_data
+                `SELECT id, title, created_at, updated_at, messages, active_request_id, agent_definition, task_data, project_folder_id
                  FROM harness_chat_conversations
                  WHERE workspace_id = $1 AND user_id = $2
                  ORDER BY updated_at DESC, id ASC`,
@@ -1046,12 +1282,23 @@ export async function createChatStore(options: ChatStoreOptions): Promise<ChatSt
         async get(scope, id) {
             validateScope(scope)
             const result = await pool.query<ConversationRow>(
-                `SELECT id, title, created_at, updated_at, messages, active_request_id, agent_definition, task_data
+                `SELECT id, title, created_at, updated_at, messages, active_request_id, agent_definition, task_data, project_folder_id
                  FROM harness_chat_conversations
                  WHERE workspace_id = $1 AND user_id = $2 AND id = $3`,
                 [scope.workspaceId, scope.userId, id]
             )
             return result.rows[0] ? conversationFromRow(result.rows[0]) : undefined
+        },
+        /**
+         * Removes an ordinary chat using the same database barriers as durable execution.
+         * @param scope - Trusted account and workspace.
+         * @param id - Exact ordinary conversation identity.
+         * @returns Whether this owner deleted the conversation.
+         * @throws Error when authorization or transactional deletion fails.
+         */
+        async remove(scope, id) {
+            validateScope(scope)
+            return deletePostgresConversation(pool, scope, id)
         },
         /**
          * Replaces a complete conversation only within its trusted ownership scope.
@@ -1063,17 +1310,23 @@ export async function createChatStore(options: ChatStoreOptions): Promise<ChatSt
         async save(scope, conversation) {
             validateScope(scope)
             const snapshot = validateConversation(conversation)
-            await pool.query(
+            const written = await pool.query(
                 `INSERT INTO harness_chat_conversations
-                 (workspace_id, user_id, id, title, created_at, updated_at, messages, active_request_id, agent_definition, task_data)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10::jsonb)
+                 (workspace_id, user_id, id, title, created_at, updated_at, messages, active_request_id, agent_definition, task_data, project_folder_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10::jsonb, $11)
                  ON CONFLICT (workspace_id, user_id, id) DO UPDATE SET
                  title = EXCLUDED.title, created_at = EXCLUDED.created_at,
                  updated_at = EXCLUDED.updated_at, messages = EXCLUDED.messages,
                  active_request_id = EXCLUDED.active_request_id, agent_definition = EXCLUDED.agent_definition,
-                 task_data = EXCLUDED.task_data`,
-                conversationParameters(scope, snapshot)
+                 task_data = EXCLUDED.task_data
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM harness_collaboration_sources s
+                     WHERE s.workspace_id=EXCLUDED.workspace_id AND s.user_id=EXCLUDED.user_id
+                     AND s.source_id=EXCLUDED.id AND (s.bound OR s.active_token IS NOT NULL)
+                 )`,
+                [...conversationParameters(scope, snapshot), snapshot.projectFolderId ?? null]
             )
+            if (!written.rowCount) throw new Error('Conversation has a durable writer; use the versioned source interface.')
         },
         /**
          * Closes the shared PostgreSQL pool on application shutdown.

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createChatStore, type ChatStore, type StoredProject } from '../src/index.js'
+import { createMemoryChatStore, createChatStore, type ChatStore, type StoredProject } from '../src/index.js'
 
 const database = vi.hoisted(() => ({ query: vi.fn(), end: vi.fn(), poolCount: 0 }))
 
 vi.mock('pg', () => ({
     default: {
         Pool: class {
+            on = vi.fn()
             /**
              * Counts pools to verify that projects share the parent lifecycle.
              */
@@ -14,6 +15,13 @@ vi.mock('pg', () => ({
             }
             query = database.query
             end = database.end
+            /**
+             * Supplies one shared transaction client for serialized schema initialization.
+             * @returns A client using the mock pool transport.
+             */
+            async connect() {
+                return { query: database.query, release: vi.fn() }
+            }
         },
     },
 }))
@@ -54,7 +62,7 @@ afterEach(async () => {
 
 describe('memory project records', () => {
     it('isolates both ownership fields and allows duplicate names and independent scoped identifiers', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const first = project()
         const second = project({ id: '6155f4d2-81c1-4aef-a6ad-14bbfa5b2409', updatedAt: '2026-10-17T03:00:00.000Z' })
@@ -73,7 +81,7 @@ describe('memory project records', () => {
     })
 
     it('preserves independent current and creation snapshots and clears projects with the parent store', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const input = project()
         await store.projects!.save(scope, input)
@@ -92,7 +100,7 @@ describe('memory project records', () => {
     })
 
     it('rejects invalid or unknown current and creation data without replacing the last saved record', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const saved = project()
         await store.projects!.save(scope, saved)
@@ -110,7 +118,7 @@ describe('memory project records', () => {
     })
 
     it('requires complete trusted ownership before project reads and writes', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         for (const invalidScope of [
             { userId: '', workspaceId: scope.workspaceId },

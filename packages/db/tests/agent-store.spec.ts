@@ -1,12 +1,13 @@
 import type { AgentDefinition, ChatConversation } from '@ai-harness/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createChatStore, type ChatStore } from '../src/index.js'
+import { createMemoryChatStore, createChatStore, type ChatStore } from '../src/index.js'
 
 const database = vi.hoisted(() => ({ query: vi.fn(), end: vi.fn(), configurations: [] as unknown[] }))
 
 vi.mock('pg', () => ({
     default: {
         Pool: class {
+            on = vi.fn()
             /**
              * Record connection settings while replacing network persistence in tests.
              * @param configuration - Application pool settings.
@@ -16,6 +17,13 @@ vi.mock('pg', () => ({
             }
             query = database.query
             end = database.end
+            /**
+             * Supplies one shared transaction client for serialized schema initialization.
+             * @returns A client using the mock pool transport.
+             */
+            async connect() {
+                return { query: database.query, release: vi.fn() }
+            }
         },
     },
 }))
@@ -63,7 +71,7 @@ function conversation(definition: AgentDefinition): ChatConversation {
 }
 
 beforeEach(() => {
-    database.query.mockReset().mockResolvedValue({ rows: [] })
+    database.query.mockReset().mockResolvedValue({ rows: [], rowCount: 1 })
     database.end.mockReset().mockResolvedValue(undefined)
     database.configurations.length = 0
 })
@@ -74,7 +82,7 @@ afterEach(async () => {
 
 describe('scoped memory agent persistence', () => {
     it('roundtrips independent definitions and filters both ownership dimensions', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = agent()
         await store.agents!.save(scope, original)
@@ -100,7 +108,7 @@ describe('scoped memory agent persistence', () => {
     })
 
     it('updates configurations, sorts by activity, and closes with the parent store', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         await store.agents!.save(scope, agent())
         await store.agents!.save(scope, agent({ name: 'Updated', toolIds: [], updatedAt: '2026-10-17T02:02:00.000Z' }))
@@ -112,7 +120,7 @@ describe('scoped memory agent persistence', () => {
     })
 
     it('validates ownership and agent data before storing a definition', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const missingScope = { userId: '', workspaceId: scope.workspaceId }
         await expect(store.agents!.list(missingScope)).rejects.toThrow('trusted userId and workspaceId')
@@ -124,7 +132,7 @@ describe('scoped memory agent persistence', () => {
     })
 
     it('retains the chosen conversation snapshot after the saved agent changes', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = agent()
         const snapshot = conversation(original)
@@ -140,14 +148,17 @@ describe('PostgreSQL agent persistence', () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/agents' })
         stores.push(store)
         expect(database.configurations).toHaveLength(1)
-        expect(database.query.mock.calls[4]![0]).toContain('harness_agent_definitions')
+        expect(
+            database.query.mock.calls.some(call => String(call[0]).includes('CREATE TABLE IF NOT EXISTS harness_agent_definitions'))
+        ).toBe(true)
         database.query.mockClear()
         await store.agents!.list(scope)
         await store.agents!.get(scope, agent().id)
-        expect(database.query.mock.calls[0]![0]).toContain('WHERE workspace_id = $1 AND user_id = $2')
-        expect(database.query.mock.calls[0]![1]).toEqual([scope.workspaceId, scope.userId])
-        expect(database.query.mock.calls[1]![0]).toContain('WHERE workspace_id = $1 AND user_id = $2 AND id = $3')
-        expect(database.query.mock.calls[1]![1]).toEqual([scope.workspaceId, scope.userId, agent().id])
+        const reads = database.query.mock.calls.filter(call => String(call[0]).includes('FROM harness_agent_definitions'))
+        expect(reads[0]![0]).toContain('WHERE workspace_id = $1 AND user_id = $2')
+        expect(reads[0]![1]).toEqual([scope.workspaceId, scope.userId])
+        expect(reads[1]![0]).toContain('WHERE workspace_id = $1 AND user_id = $2 AND id = $3')
+        expect(reads[1]![1]).toEqual([scope.workspaceId, scope.userId, agent().id])
         expect(await store.agents!.get(otherUser, agent().id)).toBeUndefined()
     })
 
@@ -157,14 +168,20 @@ describe('PostgreSQL agent persistence', () => {
         const snapshot = agent({ systemPrompt: "Prompt with SQL ' character" })
         database.query.mockClear()
         await store.agents!.save(scope, snapshot)
-        const [sql, parameters] = database.query.mock.calls[0]!
+        expect(database.query.mock.calls[0]![0]).toBe('BEGIN')
+        expect(database.query.mock.calls.at(-1)![0]).toBe('COMMIT')
+        const [sql, parameters] = database.query.mock.calls.find(call => String(call[0]).includes('INSERT INTO harness_agent_definitions'))!
         expect(sql).toContain('ON CONFLICT (workspace_id, user_id, id) DO UPDATE SET data = EXCLUDED.data')
         expect(sql).not.toContain(snapshot.systemPrompt)
         expect(parameters.slice(0, 3)).toEqual([scope.workspaceId, scope.userId, snapshot.id])
         expect(JSON.parse(parameters[3])).toEqual(snapshot)
-        database.query.mockResolvedValueOnce({ rows: [{ data: snapshot }] })
+        database.query.mockImplementation(async (sql: string) => ({
+            rows: sql.includes('FROM harness_agent_definitions') ? [{ data: snapshot }] : [],
+        }))
         expect(await store.agents!.get(scope, snapshot.id)).toEqual(snapshot)
-        database.query.mockResolvedValueOnce({ rows: [{ data: { ...snapshot, id: 'invalid' } }] })
+        database.query.mockImplementation(async (sql: string) => ({
+            rows: sql.includes('FROM harness_agent_definitions') ? [{ data: { ...snapshot, id: 'invalid' } }] : [],
+        }))
         await expect(store.agents!.list(scope)).rejects.toThrow()
     })
 

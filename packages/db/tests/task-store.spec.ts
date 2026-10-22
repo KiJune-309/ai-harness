@@ -1,14 +1,22 @@
 import type { ChatConversation, PersonalTask } from '@ai-harness/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createChatStore, type ChatStore } from '../src/index.js'
+import { createMemoryChatStore, createChatStore, type ChatStore } from '../src/index.js'
 
 const database = vi.hoisted(() => ({ query: vi.fn(), end: vi.fn() }))
 
 vi.mock('pg', () => ({
     default: {
         Pool: class {
+            on = vi.fn()
             query = database.query
             end = database.end
+            /**
+             * Supplies one shared transaction client for serialized schema initialization.
+             * @returns A client using the mock pool transport.
+             */
+            async connect() {
+                return { query: database.query, release: vi.fn() }
+            }
         },
     },
 }))
@@ -80,7 +88,7 @@ function row(snapshot: ChatConversation) {
 }
 
 beforeEach(() => {
-    database.query.mockReset().mockResolvedValue({ rows: [] })
+    database.query.mockReset().mockResolvedValue({ rows: [], rowCount: 1 })
     database.end.mockReset().mockResolvedValue(undefined)
 })
 
@@ -90,7 +98,7 @@ afterEach(async () => {
 
 describe('memory task snapshots', () => {
     it('preserves current and original project identifiers independently while keeping legacy ungrouped tasks valid', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = task()
         await store.save(scope, original)
@@ -107,7 +115,7 @@ describe('memory task snapshots', () => {
         expect(await store.get(scope, original.id)).toEqual(removed)
     })
     it('roundtrips task, agent, and messages together without leaking ownership or mutable references', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = task()
         await store.save(scope, original)
@@ -126,7 +134,7 @@ describe('memory task snapshots', () => {
     })
 
     it('replaces a complete task atomically and preserves its previous snapshot on validation failure', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = task()
         await store.save(scope, original)
@@ -145,7 +153,7 @@ describe('memory task snapshots', () => {
     })
 
     it('rejects task snapshots without frozen agents before replacing the original record', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = task()
         await store.save(scope, original)

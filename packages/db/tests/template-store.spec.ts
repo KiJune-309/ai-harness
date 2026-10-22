@@ -2,6 +2,7 @@ import type { PersonalTask, TemplateInput } from '@ai-harness/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     createChatStore,
+    createMemoryChatStore,
     TemplateConflictError,
     type ChatStore,
     type StoredProjectTemplate,
@@ -20,6 +21,7 @@ const database = vi.hoisted(() => ({
 vi.mock('pg', () => ({
     default: {
         Pool: class {
+            on = vi.fn()
             /**
              * Records use of one pool for conversations, templates, and transactional launches.
              */
@@ -149,7 +151,10 @@ beforeEach(() => {
     database.end.mockReset().mockResolvedValue(undefined)
     database.clientQuery.mockReset().mockResolvedValue({ rows: [] })
     database.release.mockReset()
-    database.connect.mockReset().mockResolvedValue({ query: database.clientQuery, release: database.release })
+    database.connect
+        .mockReset()
+        .mockResolvedValue({ query: database.clientQuery, release: database.release })
+        .mockResolvedValueOnce({ query: database.query, release: vi.fn() })
     database.poolCount = 0
 })
 
@@ -159,8 +164,9 @@ afterEach(async () => {
 
 describe('memory template persistence', () => {
     it('isolates both scope fields, returns deep copies, and orders templates by update', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         const original = template()
         await store.templates!.save(scope, original)
         original.template.tasks[0]!.goal = 'Mutated input'
@@ -183,8 +189,9 @@ describe('memory template persistence', () => {
     })
 
     it('compare-and-swaps once, rejects stale or duplicate writes, and preserves original creation input', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         await store.templates!.save(scope, template())
         await expect(store.templates!.save(scope, template())).rejects.toBeInstanceOf(TemplateConflictError)
         const first = template({ version: 2, name: 'First update' })
@@ -202,8 +209,9 @@ describe('memory template persistence', () => {
     })
 
     it('rejects invalid current and original sections before publication and requires trusted scope', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         const invalid = template()
         invalid.creation.tasks[2]!.goal = ''
         await expect(store.templates!.save(scope, invalid)).rejects.toThrow()
@@ -217,8 +225,9 @@ describe('memory template persistence', () => {
     })
 
     it('publishes one complete batch with copies and clears templates and launch actions with the parent lifecycle', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         await store.templates!.save(scope, template())
         const initial = batch()
         const results = await Promise.allSettled([
@@ -247,8 +256,9 @@ describe('memory template persistence', () => {
     })
 
     it('leaves no partial project, earlier tasks, or launch when a later item is invalid or collides', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         await store.templates!.save(scope, template())
         const malformed = batch()
         malformed.tasks[2]!.task.goal = ''
@@ -268,8 +278,9 @@ describe('memory template persistence', () => {
     })
 
     it('rejects stale or foreign template versions and inconsistent relationships without changing records', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         await store.templates!.save(scope, template())
         await expect(store.instantiateTemplateProject!(otherUser, batch())).rejects.toBeInstanceOf(TemplateConflictError)
         await expect(store.instantiateTemplateProject!(otherWorkspace, batch())).rejects.toBeInstanceOf(TemplateConflictError)
@@ -284,8 +295,9 @@ describe('memory template persistence', () => {
     })
 
     it('can retry the same launch after a later validation failure and publishes exactly one complete result', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
+        database.connect.mockClear()
         await store.templates!.save(scope, template())
         const invalid = batch()
         invalid.tasks[2]!.task.goal = ''
@@ -301,6 +313,7 @@ describe('PostgreSQL template persistence', () => {
     it('shares one pool, scopes every read, and restores current, creation, and launch records', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         expect(database.poolCount).toBe(1)
         expect(database.query.mock.calls.map(call => call[0]).join('\n')).toContain('harness_template_launches')
         database.query.mockClear().mockResolvedValue({ rows: [{ data: template() }] })
@@ -322,6 +335,7 @@ describe('PostgreSQL template persistence', () => {
     it('inserts without overwrite and compare-and-swaps the scoped version while preserving original creation input', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         database.query.mockClear()
         await store.templates!.save(scope, template())
         expect(database.query.mock.calls[0]![0]).not.toContain('ON CONFLICT')
@@ -341,6 +355,7 @@ describe('PostgreSQL template persistence', () => {
     it('rejects malformed persisted template and launch data and validates input before querying', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         const invalid = template()
         invalid.creation.tasks[1]!.goal = ''
         database.query.mockResolvedValueOnce({ rows: [{ data: invalid }] })
@@ -356,6 +371,7 @@ describe('PostgreSQL template persistence', () => {
     it('holds the scoped template version and writes project, ordered tasks, and launch on one transaction client', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         transactionTemplate()
         database.query.mockClear()
         const initial = batch()
@@ -364,28 +380,32 @@ describe('PostgreSQL template persistence', () => {
         expect(database.query).not.toHaveBeenCalled()
         const calls = database.clientQuery.mock.calls
         expect(calls[0]![0]).toBe('BEGIN')
-        expect(calls[1]![0]).toContain('WHERE workspace_id = $1 AND user_id = $2 AND id = $3 FOR SHARE')
-        expect(calls[1]![1]).toEqual([scope.workspaceId, scope.userId, templateId])
-        expect(calls[2]![0]).toContain('INSERT INTO harness_personal_projects')
-        expect(JSON.parse(calls[2]![1][3])).toEqual(initial.project)
+        const locked = calls.find(call => String(call[0]).includes('harness_project_templates') && String(call[0]).includes('FOR SHARE'))!
+        expect(locked[0]).toContain('WHERE workspace_id = $1 AND user_id = $2 AND id = $3')
+        expect(locked[1]).toEqual([scope.workspaceId, scope.userId, templateId])
+        const projectWrite = calls.find(call => String(call[0]).includes('INSERT INTO harness_personal_projects'))!
+        expect(JSON.parse(projectWrite[1][3])).toEqual(initial.project)
+        const taskWrites = calls.filter(call => String(call[0]).includes('INSERT INTO harness_chat_conversations'))
+        expect(taskWrites).toHaveLength(initial.tasks.length)
         for (let index = 0; index < initial.tasks.length; index += 1) {
-            const [sql, parameters] = calls[index + 3]!
-            expect(sql).toContain('INSERT INTO harness_chat_conversations')
+            const [sql, parameters] = taskWrites[index]!
             expect(sql).not.toContain('ON CONFLICT')
             expect(parameters.slice(0, 3)).toEqual([scope.workspaceId, scope.userId, initial.tasks[index]!.id])
             expect(JSON.parse(parameters[8])).toEqual(initial.tasks[index]!.agent)
             expect(JSON.parse(parameters[9])).toEqual(initial.tasks[index]!.task)
         }
-        expect(calls[6]![0]).toContain('INSERT INTO harness_template_launches')
-        expect(JSON.parse(calls[6]![1][3])).toEqual(initial.launch)
-        expect(calls[7]![0]).toBe('COMMIT')
-        expect(calls.some(call => String(call[0]).includes('ON CONFLICT'))).toBe(false)
+        const launchWrite = calls.find(call => String(call[0]).includes('INSERT INTO harness_template_launches'))!
+        expect(JSON.parse(launchWrite[1][3])).toEqual(initial.launch)
+        expect(calls.at(-1)![0]).toBe('COMMIT')
+        expect(projectWrite[0]).not.toContain('ON CONFLICT')
+        expect(launchWrite[0]).not.toContain('ON CONFLICT')
         expect(database.release).toHaveBeenCalledOnce()
     })
 
     it('rolls back after a later task write fails and does not write a successful launch or commit', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         const failure = new Error('Second task write failed')
         database.clientQuery.mockImplementation(async (sql: string, parameters?: unknown[]) => {
             if (sql.includes('FOR SHARE')) return { rows: [{ data: template() }] }
@@ -405,15 +425,19 @@ describe('PostgreSQL template persistence', () => {
     it('rejects stale locked versions before writing, maps unique conflicts, and always releases its client', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         transactionTemplate(template({ version: 2 }))
         await expect(store.instantiateTemplateProject!(scope, batch())).rejects.toBeInstanceOf(TemplateConflictError)
-        expect(database.clientQuery.mock.calls.map(call => call[0])).toHaveLength(3)
+        expect(database.clientQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO harness_personal_projects'))).toBe(false)
+        expect(database.clientQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO harness_chat_conversations'))).toBe(false)
         expect(database.clientQuery.mock.calls.at(-1)![0]).toBe('ROLLBACK')
         database.clientQuery.mockClear()
         transactionTemplate()
-        database.clientQuery.mockImplementationOnce(async () => ({ rows: [] }))
-        database.clientQuery.mockImplementationOnce(async () => ({ rows: [{ data: template() }] }))
-        database.clientQuery.mockRejectedValueOnce(Object.assign(new Error('Existing project id'), { code: '23505' }))
+        database.clientQuery.mockImplementation(async (sql: string) => {
+            if (sql.includes('INSERT INTO harness_personal_projects'))
+                throw Object.assign(new Error('Existing project id'), { code: '23505' })
+            return { rows: sql.includes('harness_project_templates') && sql.includes('FOR SHARE') ? [{ data: template() }] : [] }
+        })
         await expect(store.instantiateTemplateProject!(scope, batch())).rejects.toBeInstanceOf(TemplateConflictError)
         expect(database.clientQuery.mock.calls.at(-1)![0]).toBe('ROLLBACK')
         expect(database.release).toHaveBeenCalledTimes(2)
@@ -422,6 +446,7 @@ describe('PostgreSQL template persistence', () => {
     it('retains the original commit failure if rollback also fails and still releases the client', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         const failure = new Error('Commit failed')
         database.clientQuery.mockImplementation(async (sql: string) => {
             if (sql === 'COMMIT') throw failure
@@ -436,6 +461,7 @@ describe('PostgreSQL template persistence', () => {
     it('does not acquire a transaction client for an invalid later task or missing ownership', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/templates' })
         stores.push(store)
+        database.connect.mockClear()
         const invalid = batch()
         invalid.tasks[2]!.task.goal = ''
         await expect(store.instantiateTemplateProject!(scope, invalid)).rejects.toThrow()

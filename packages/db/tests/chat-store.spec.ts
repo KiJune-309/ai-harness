@@ -1,6 +1,6 @@
 import type { ChatConversation } from '@ai-harness/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createChatStore, type ChatStore } from '../src/index.js'
+import { createMemoryChatStore, createChatStore, type ChatStore } from '../src/index.js'
 
 const database = vi.hoisted(() => ({
     query: vi.fn(),
@@ -11,6 +11,7 @@ const database = vi.hoisted(() => ({
 vi.mock('pg', () => ({
     default: {
         Pool: class {
+            on = vi.fn()
             /**
              * Records database configuration while replacing the driver in tests.
              * @param configuration - Pool configuration provided by the application.
@@ -20,6 +21,13 @@ vi.mock('pg', () => ({
             }
             query = database.query
             end = database.end
+            /**
+             * Supplies one shared transaction client for serialized schema initialization.
+             * @returns A client using the mock pool transport.
+             */
+            async connect() {
+                return { query: database.query, release: vi.fn() }
+            }
         },
     },
 }))
@@ -54,7 +62,7 @@ function conversation(changes: Partial<ChatConversation> = {}): ChatConversation
 }
 
 beforeEach(() => {
-    database.query.mockReset().mockResolvedValue({ rows: [] })
+    database.query.mockReset().mockResolvedValue({ rows: [], rowCount: 1 })
     database.end.mockReset().mockResolvedValue(undefined)
     database.configurations.length = 0
 })
@@ -64,14 +72,14 @@ afterEach(async () => {
 })
 
 describe('explicit memory chat storage', () => {
-    it('requires explicit temporary storage opt-in when no database is configured', async () => {
+    it('requires PostgreSQL rather than an environment-selected memory fallback', async () => {
         await expect(createChatStore({})).rejects.toThrow('DATABASE_URL')
-        await expect(createChatStore({ databaseUrl: '   ', allowMemory: false })).rejects.toThrow('CHAT_STORE=memory')
+        await expect(createChatStore({ databaseUrl: '   ' })).rejects.toThrow('DATABASE_URL')
         expect(database.configurations).toHaveLength(0)
     })
 
     it('scopes ownership for every read and allows independent scoped identifiers', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = conversation()
         await store.save(scope, original)
@@ -90,7 +98,7 @@ describe('explicit memory chat storage', () => {
     })
 
     it('saves independent snapshots, replaces messages, and sorts by update time', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         const original = conversation()
         await store.save(scope, original)
@@ -110,7 +118,7 @@ describe('explicit memory chat storage', () => {
     })
 
     it('validates scope and conversation data before storing records', async () => {
-        const store = await createChatStore({ allowMemory: true })
+        const store = await createMemoryChatStore()
         stores.push(store)
         await expect(store.list({ userId: '', workspaceId: 'workspace-one' })).rejects.toThrow('trusted userId and workspaceId')
         await expect(store.get({ userId: 'user-one', workspaceId: ' ' }, conversation().id)).rejects.toThrow(
@@ -125,16 +133,46 @@ describe('PostgreSQL chat storage', () => {
     it('opens one pool and initializes durable storage before returning', async () => {
         const store = await createChatStore({ databaseUrl: 'postgresql://test.invalid/chat' })
         stores.push(store)
-        expect(database.configurations).toEqual([{ connectionString: 'postgresql://test.invalid/chat' }])
-        expect(database.query.mock.calls[0]?.[0]).toContain('PRIMARY KEY (workspace_id, user_id, id)')
-        expect(database.query.mock.calls[1]?.[0]).toContain('ADD COLUMN IF NOT EXISTS active_request_id text')
-        expect(database.query.mock.calls[2]?.[0]).toContain('ADD COLUMN IF NOT EXISTS agent_definition jsonb')
-        expect(database.query.mock.calls[3]?.[0]).toContain('ADD COLUMN IF NOT EXISTS task_data jsonb')
-        expect(database.query.mock.calls[4]?.[0]).toContain('CREATE TABLE IF NOT EXISTS harness_agent_definitions')
-        expect(database.query.mock.calls[5]?.[0]).toContain('CREATE TABLE IF NOT EXISTS harness_personal_projects')
-        expect(database.query.mock.calls[6]?.[0]).toContain('CREATE TABLE IF NOT EXISTS harness_project_templates')
-        expect(database.query.mock.calls[7]?.[0]).toContain('CREATE TABLE IF NOT EXISTS harness_template_launches')
-        expect(database.query).toHaveBeenCalledTimes(8)
+        expect(database.configurations).toEqual([{ connectionString: 'postgresql://test.invalid/chat', connectionTimeoutMillis: 5000 }])
+        expect(database.query.mock.calls[0]?.[0]).toBe('BEGIN')
+        expect(database.query.mock.calls[1]?.[0]).toContain('pg_advisory_xact_lock')
+        const statements = database.query.mock.calls.slice(2, -1).map(call => String(call[0]))
+        for (const name of [
+            'harness_chat_conversations',
+            'harness_agent_definitions',
+            'harness_skills',
+            'harness_skill_versions',
+            'harness_skill_actions',
+            'harness_personal_projects',
+            'harness_project_templates',
+            'harness_template_launches',
+            'harness_accounts',
+            'harness_account_sessions',
+            'harness_account_models',
+            'harness_knowledge_documents',
+            'harness_knowledge_chunks',
+            'harness_knowledge_retry_actions',
+            'harness_embedding_models',
+            'harness_embedding_create_actions',
+            'harness_vector_jobs',
+            'harness_vector_actions',
+        ]) {
+            expect(statements.some(sql => sql.includes(`CREATE TABLE IF NOT EXISTS ${name}`))).toBe(true)
+        }
+        expect(statements.filter(sql => sql.includes('ADD COLUMN IF NOT EXISTS'))).toEqual(
+            expect.arrayContaining([
+                'ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS active_request_id text',
+                'ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS agent_definition jsonb',
+                'ALTER TABLE harness_chat_conversations ADD COLUMN IF NOT EXISTS task_data jsonb',
+                'ALTER TABLE harness_workspaces ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT clock_timestamp()',
+                'ALTER TABLE harness_workspace_invitations ADD COLUMN IF NOT EXISTS recipient_id uuid REFERENCES harness_accounts(id)',
+                'ALTER TABLE harness_collaboration_sources ADD COLUMN IF NOT EXISTS request_id uuid',
+            ])
+        )
+        expect(statements).toContain('ALTER TABLE harness_collaboration_sources ADD COLUMN IF NOT EXISTS request_id uuid')
+        expect(statements.some(sql => sql.includes('harness_account_sessions_user_idx'))).toBe(true)
+        expect(database.query.mock.calls.at(-1)?.[0]).toBe('COMMIT')
+        expect(statements.some(sql => sql.includes('SAVEPOINT harness_optional_vector'))).toBe(true)
     })
 
     it('uses both trusted ownership parameters on every read', async () => {
@@ -197,9 +235,7 @@ describe('PostgreSQL chat storage', () => {
 
     it('closes the pool if initialization fails and does not silently switch to memory', async () => {
         database.query.mockRejectedValueOnce(new Error('database unavailable'))
-        await expect(createChatStore({ databaseUrl: 'postgresql://test.invalid/chat', allowMemory: true })).rejects.toThrow(
-            'database unavailable'
-        )
+        await expect(createChatStore({ databaseUrl: 'postgresql://test.invalid/chat' })).rejects.toThrow('database unavailable')
         expect(database.end).toHaveBeenCalledOnce()
     })
 })
