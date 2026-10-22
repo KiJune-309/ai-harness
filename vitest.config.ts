@@ -39,11 +39,24 @@ function coreSourceAliases(directory: string, subpaths: string[]) {
 export default defineConfig({
     resolve: {
         alias: [
+            { find: /^@\//, replacement: fileURLToPath(new URL('./apps/web/', import.meta.url)) },
             { find: /^@ai-harness\/contracts$/, replacement: fileURLToPath(new URL('./packages/contracts/src/index.ts', import.meta.url)) },
             { find: /^@ai-harness\/db$/, replacement: fileURLToPath(new URL('./packages/db/src/index.ts', import.meta.url)) },
             {
                 find: /^@ai-harness\/chat-runtime$/,
                 replacement: fileURLToPath(new URL('./packages/core/chat-runtime/src/index.ts', import.meta.url)),
+            },
+            {
+                find: /^@ai-harness\/chat-runtime\/embeddings$/,
+                replacement: fileURLToPath(new URL('./packages/core/chat-runtime/src/embeddings.ts', import.meta.url)),
+            },
+            {
+                find: /^@ai-harness\/chat-runtime\/knowledge$/,
+                replacement: fileURLToPath(new URL('./packages/core/chat-runtime/src/knowledge.ts', import.meta.url)),
+            },
+            {
+                find: /^@ai-harness\/chat-runtime\/collaboration$/,
+                replacement: fileURLToPath(new URL('./packages/core/chat-runtime/src/collaboration.ts', import.meta.url)),
             },
             // Source-mode core imports Cordis const enums that its published bundle erases.
             { find: /^@deepseek-ai\/cordis$/, replacement: coreRequire.resolve('@deepseek-ai/cordis/src/index.ts') },
@@ -57,7 +70,7 @@ export default defineConfig({
             // Process published plugins through Vite so their core imports use the local aliases too.
             deps: { inline: [/@deepseek-ai\//] },
         },
-        include: ['{apps,packages}/**/tests/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs,mts,cts}'],
+        include: ['{apps,packages,scripts}/**/tests/**/*.{test,spec}.{js,jsx,ts,tsx,mjs,cjs,mts,cts}'],
         exclude: [
             ...configDefaults.exclude,
             // Repository maintenance gates depend on scripts from the full upstream repository.
