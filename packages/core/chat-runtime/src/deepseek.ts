@@ -19,6 +19,7 @@ export interface DeepSeekOptions {
     maxTokens?: number
     timeoutMs?: number
     fetch?: typeof fetch
+    compatibility?: 'openai'
 }
 
 /** Model-visible Chat Completions message without runtime metadata. */
@@ -135,10 +136,11 @@ function parseEvent(payload: string): ProviderEvent {
 /**
  * Project canonical role-ordered history including native tool calls and results.
  * @param messages - Core-derived history in conversation order.
+ * @param includeReasoning - Whether the provider accepts DeepSeek reasoning fields.
  * @returns Chat Completions messages preserving call/result correlation and reasoning.
  * @throws LlmError when unsupported content reaches the text/tool adapter.
  */
-function wireMessages(messages: readonly RequestMessage[]): WireMessage[] {
+function wireMessages(messages: readonly RequestMessage[], includeReasoning = true): WireMessage[] {
     return messages.map(message => {
         let text = ''
         let reasoning = ''
@@ -156,7 +158,7 @@ function wireMessages(messages: readonly RequestMessage[]): WireMessage[] {
         return {
             role: message.role === 'developer' ? 'system' : message.role,
             content: text,
-            ...(reasoning ? { reasoning_content: reasoning } : {}),
+            ...(reasoning && includeReasoning ? { reasoning_content: reasoning } : {}),
             ...(calls.length ? { tool_calls: calls } : {}),
             ...(message.role === 'tool' ? { tool_call_id: message.toolCallId } : {}),
         }
@@ -225,7 +227,7 @@ export class DeepSeekAdapter extends LlmAdapter {
         let finish: ProviderEvent['finish']
         try {
             signal.throwIfAborted()
-            const messages = wireMessages(options.messages)
+            const messages = wireMessages(options.messages, this.options.compatibility !== 'openai')
             if (options.system) messages.unshift({ role: 'system', content: options.system })
             const response = await this.request(this.endpoint, {
                 method: 'POST',
@@ -256,6 +258,7 @@ export class DeepSeekAdapter extends LlmAdapter {
                     ...((options.maxTokens ?? this.options.maxTokens) ? { max_tokens: options.maxTokens ?? this.options.maxTokens } : {}),
                 }),
                 signal,
+                redirect: 'error',
             })
             if (signal.aborted) {
                 await response.body?.cancel().catch(() => undefined)
