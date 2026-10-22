@@ -1,4 +1,17 @@
 import { z } from 'zod'
+import { personMentionSchema } from './collaboration.js'
+import { humanRequestSchema, humanResponseSchema } from './human-loop.js'
+export * from './accounts.js'
+export * from './knowledge.js'
+export * from './embeddings.js'
+export * from './collaboration.js'
+export * from './workspaces.js'
+export * from './workflow-template.js'
+export * from './skills.js'
+export * from './project-folders.js'
+export * from './human-loop.js'
+import { workflowTemplateSchema } from './workflow-template.js'
+import { skillRefsSchema, skillSnapshotsSchema } from './skills.js'
 
 export const agentToolIdSchema = z.enum(['calculator', 'current-time'])
 
@@ -16,10 +29,11 @@ const agentFields = {
         .max(5, '最多配置 5 条开场消息。'),
 }
 
-export const agentInputSchema = z.object(agentFields).strict()
+export const agentInputSchema = z.object({ ...agentFields, skillRefs: skillRefsSchema.optional() }).strict()
 export const agentDefinitionSchema = z
     .object({
         ...agentFields,
+        skillSnapshots: skillSnapshotsSchema.optional(),
         id: z.uuid(),
         createdAt: z.iso.datetime(),
         updatedAt: z.iso.datetime(),
@@ -123,6 +137,11 @@ export const projectTemplateSchema = templateInputSchema.safeExtend({
 export const launchTemplateSchema = projectInputSchema.extend({ requestId: z.uuid(), version: z.number().int().positive() })
 export const templateLaunchResultSchema = z.object({ project: personalProjectSchema, taskIds: z.array(z.uuid()).min(1).max(8) }).strict()
 export type TemplateTask = z.infer<typeof templateTaskSchema>
+export const templateCatalogEntrySchema = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('personal'), template: projectTemplateSchema }).strict(),
+    z.object({ kind: z.literal('workflow'), template: workflowTemplateSchema }).strict(),
+])
+export type TemplateCatalogEntry = z.infer<typeof templateCatalogEntrySchema>
 export type TemplateInput = z.infer<typeof templateInputSchema>
 export type CreateTemplate = z.infer<typeof createTemplateSchema>
 export type UpdateTemplate = z.infer<typeof updateTemplateSchema>
@@ -138,16 +157,21 @@ export const chatMessageSchema = z.object({
     status: z.enum(['complete', 'cancelled', 'error']),
     createdAt: z.iso.datetime(),
     requestId: z.uuid().optional(),
-    kind: z.literal('opening').optional(),
+    kind: z.enum(['opening', 'relay']).optional(),
 })
 
 export const chatConversationSchema = z.object({
     id: z.uuid(),
     title: z.string().min(1).max(128),
     messages: z.array(chatMessageSchema),
+    humanRequests: z.array(humanRequestSchema).optional(),
     createdAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
     activeRequestId: z.uuid().optional(),
+    projectFolderId: z
+        .uuid()
+        .transform(value => value.toLowerCase())
+        .optional(),
     agentId: z.uuid().optional(),
     agent: agentDefinitionSchema.optional(),
     task: taskMetadataSchema.optional(),
@@ -161,14 +185,33 @@ export type ProjectDetail = z.infer<typeof projectDetailSchema>
 export const chatStatusSchema = z.object({
     configured: z.boolean(),
     model: z.string(),
-    storage: z.enum(['memory', 'postgres']),
+    storage: z.literal('postgres'),
 })
 
 export const createConversationSchema = z
-    .object({ title: z.string().trim().min(1).max(128).optional(), agentId: z.uuid().optional() })
+    .object({
+        title: z.string().trim().min(1).max(128).optional(),
+        agentId: z.uuid().optional(),
+        projectFolderId: z
+            .uuid()
+            .transform(value => value.toLowerCase())
+            .optional(),
+        requestId: z
+            .uuid()
+            .transform(value => value.toLowerCase())
+            .optional(),
+    })
     .strict()
-export const sendChatMessageSchema = z.object({ content: z.string().trim().min(1).max(32_000), requestId: z.uuid() }).strict()
+export const sendChatMessageSchema = z
+    .object({
+        content: z.string().trim().min(1).max(32_000),
+        requestId: z.uuid(),
+        mentions: z.array(personMentionSchema).max(20).optional(),
+        humanResponse: humanResponseSchema.optional(),
+    })
+    .strict()
 export const cancelChatMessageSchema = z.object({ requestId: z.uuid() }).strict()
+export const deleteConversationResultSchema = z.object({ id: z.uuid(), deleted: z.literal(true) }).strict()
 
 export const chatStreamEventSchema = z.discriminatedUnion('type', [
     z.object({ type: z.literal('start'), conversationId: z.uuid(), requestId: z.uuid() }),

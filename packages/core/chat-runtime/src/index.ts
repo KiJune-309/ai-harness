@@ -16,13 +16,20 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createHash, randomUUID } from 'node:crypto'
 import { DeepSeekAdapter, type DeepSeekOptions } from './deepseek.ts'
 import { registerAgentTools } from './tools.ts'
+import { registerProjectKnowledge, type ProjectKnowledgePort } from './project-knowledge.ts'
+import { registerSkillSnapshots } from './skills.ts'
+import { OpenAiCompatibleAdapter, type ModelConnection } from './openai-compatible.ts'
+import type { ModelAddressOptions } from './model-connection.ts'
 
 const MAX_MODEL_STEPS = 8
 
+export type { ProjectKnowledgePort } from './project-knowledge.ts'
 export type { DeepSeekOptions } from './deepseek.ts'
+export { validateModelBaseUrl, isAllowedModelAddress, createModelFetch } from './model-connection.ts'
+export { testModelConnection, OpenAiCompatibleAdapter, type ModelConnection } from './openai-compatible.ts'
 
 /** Deployment settings owned by the API process. */
-export interface ChatRuntimeOptions extends DeepSeekOptions {
+export interface ChatRuntimeOptions extends DeepSeekOptions, ModelAddressOptions {
     systemPrompt?: string
 }
 
@@ -31,6 +38,8 @@ export interface ChatRunInput {
     scope: { userId: string; workspaceId: string }
     conversationId: string
     agent?: AgentDefinition
+    connection?: ModelConnection
+    projectKnowledge?: ProjectKnowledgePort
     history: ChatMessage[]
     content: string
     signal: AbortSignal
@@ -154,9 +163,29 @@ function historySeed(history: readonly ChatMessage[], model: string): SessionEve
 /**
  * Translate internal failures to safe, actionable application categories.
  * @param failure - Provider-neutral failure facts emitted by the core loop.
+ * @param personal - Whether credentials are managed in the current account.
  * @returns A sanitized error with no remote text or credential-bearing cause.
  */
-function publicFailure(failure: Pick<LlmFailure, 'code'> | undefined): ChatRuntimeError {
+function publicFailure(failure: Pick<LlmFailure, 'code'> | undefined, personal = false): ChatRuntimeError {
+    if (personal) {
+        const message =
+            failure?.code === 'AUTH'
+                ? '模型鉴权失败，请到账户设置检查 API Key。'
+                : failure?.code === 'RATE_LIMIT'
+                  ? '当前模型请求较多，请稍后重试。'
+                  : failure?.code === 'TIMEOUT'
+                    ? '当前模型响应超时，请稍后重试。'
+                    : '当前模型未能完成回答，请检查账户中的模型连接后重试。'
+        const code =
+            failure?.code === 'AUTH'
+                ? 'DEEPSEEK_AUTH'
+                : failure?.code === 'RATE_LIMIT'
+                  ? 'DEEPSEEK_RATE_LIMIT'
+                  : failure?.code === 'TIMEOUT'
+                    ? 'DEEPSEEK_TIMEOUT'
+                    : 'DEEPSEEK_REQUEST_FAILED'
+        return new ChatRuntimeError(message, code)
+    }
     switch (failure?.code) {
         case 'AUTH':
             return new ChatRuntimeError('DeepSeek authentication failed. Check DEEPSEEK_API_KEY on the server.', 'DEEPSEEK_AUTH')
@@ -194,11 +223,13 @@ class CordisChatRuntime implements ChatRuntime {
      * @param ctx - Cordis context fully initialized before public use.
      * @param model - Configured model route supplied to each fresh agent.
      * @param maxTokens - Optional conversation-model output cap.
+     * @param addressPolicy - Server-approved exact origins for local model connections.
      */
     constructor(
         private readonly ctx: Context,
         private readonly model: string,
-        private readonly maxTokens: number | undefined
+        private readonly maxTokens: number | undefined,
+        private readonly addressPolicy: ModelAddressOptions = {}
     ) {}
 
     /**
@@ -242,13 +273,17 @@ class CordisChatRuntime implements ChatRuntime {
         let observerFailed = false
         let modelSteps = 0
         let stepLimitReached = false
-        const model = input.agent?.modelId ?? this.model
+        const model = input.connection?.model ?? input.agent?.modelId ?? this.model
+        const provider = input.connection ? `account-${randomUUID()}` : 'deepseek'
+        let releaseAdapter: (() => void) | undefined
         try {
+            if (input.connection)
+                releaseAdapter = this.ctx.llm.registerAdapter([provider], new OpenAiCompatibleAdapter(input.connection, this.addressPolicy))
             handle = await this.ctx.agents.create({
                 sessionId: SessionId(`${key}-${randomUUID()}`),
                 seed: historySeed(input.history, model),
                 agentOptions: {
-                    provider: 'deepseek',
+                    provider,
                     model,
                     ...(this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens }),
                 },
@@ -270,8 +305,10 @@ class CordisChatRuntime implements ChatRuntime {
                                 complete: true,
                             })
                         }
+                        registerSkillSnapshots(agentCtx, input.agent.skillSnapshots)
                         registerAgentTools(agentCtx, input.agent.toolIds)
                     }
+                    registerProjectKnowledge(agentCtx, input.projectKnowledge)
                     agentCtx.on('agent/pre-step', (_payload, next) => {
                         modelSteps += 1
                         if (modelSteps <= MAX_MODEL_STEPS) return next()
@@ -319,16 +356,21 @@ class CordisChatRuntime implements ChatRuntime {
             if (signal.aborted || observerFailed) return { content, reasoning, status: 'cancelled' }
             if (stepLimitReached)
                 throw new ChatRuntimeError('Agent reached its tool step limit. Please try a simpler request.', 'AGENT_STEP_LIMIT')
-            if (turnEnd?.kind === 'error') throw publicFailure(turnEnd.error)
-            if (failure || (turnEnd?.kind !== 'completed' && turnEnd?.kind !== 'max-tokens')) throw publicFailure(failure)
+            if (turnEnd?.kind === 'error') throw publicFailure(turnEnd.error, Boolean(input.connection))
+            if (failure || (turnEnd?.kind !== 'completed' && turnEnd?.kind !== 'max-tokens'))
+                throw publicFailure(failure, Boolean(input.connection))
             return { content, reasoning, status: 'complete' }
         } catch (error: unknown) {
             if (signal.aborted || observerFailed) return { content, reasoning, status: 'cancelled' }
             if (error instanceof ChatRuntimeError) throw error
-            throw publicFailure(failure)
+            throw publicFailure(failure, Boolean(input.connection))
         } finally {
             for (const dispose of unsubscribe.reverse()) dispose()
-            await disposeAgent(handle)
+            try {
+                await disposeAgent(handle)
+            } finally {
+                releaseAdapter?.()
+            }
         }
     }
 
@@ -363,7 +405,7 @@ class CordisChatRuntime implements ChatRuntime {
 export async function createChatRuntime(options: ChatRuntimeOptions): Promise<ChatRuntime> {
     const ctx = new Context()
     try {
-        const adapter = new DeepSeekAdapter(options)
+        const adapter = options.apiKey.trim() ? new DeepSeekAdapter(options) : undefined
         const model = options.model?.trim() || 'deepseek-flash'
         await ctx.plugin(LlmRuntime)
         await ctx.plugin(SessionStore)
@@ -375,8 +417,13 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         await ctx.plugin(ToolRuntime)
         await ctx.plugin(AgentRegistry)
         await ctx.plugin(AgentLoop, { agents: [] })
-        ctx.llm.registerAdapter(['deepseek'], adapter)
-        return new CordisChatRuntime(ctx, model, options.maxTokens)
+        if (adapter) ctx.llm.registerAdapter(['deepseek'], adapter)
+        return new CordisChatRuntime(
+            ctx,
+            model,
+            options.maxTokens,
+            options.allowedLocalOrigins ? { allowedLocalOrigins: options.allowedLocalOrigins } : {}
+        )
     } catch {
         await ctx.fiber.dispose().catch(() => undefined)
         throw new ChatRuntimeError('DeepSeek chat could not initialize. Check the server configuration.', 'RUNTIME_CONFIGURATION')
