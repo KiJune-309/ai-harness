@@ -245,13 +245,18 @@ function currentTime(): ToolDefinition {
  * Register only this agent's explicit safe capabilities in its unpublished scope.
  * @param ctx - Agent-owned scoped context released with the agent handle.
  * @param toolIds - API-authorized selected tool identities.
+ * @param register - Optional classified registration adapter owned by the same Agent scope.
  * @returns Nothing; definitions remain visible only within this agent scope.
  * @throws Error if an unrecognized capability reaches the trusted boundary.
  */
-export function registerAgentTools(ctx: Context, toolIds: readonly string[]): void {
+export function registerAgentTools(ctx: Context, toolIds: readonly string[], register?: (definition: ToolDefinition) => void): void {
     for (const id of new Set(toolIds)) {
-        if (id === 'calculator') ctx.tools.register(calculator())
-        else if (id === 'current-time') ctx.tools.register(currentTime())
-        else throw new Error('Unsupported agent tool.')
+        if (id === 'calculator') {
+            if (register) register(calculator())
+            else ctx.tools.register(calculator())
+        } else if (id === 'current-time') {
+            if (register) register(currentTime())
+            else ctx.tools.register(currentTime())
+        } else throw new Error('Unsupported agent tool.')
     }
 }
