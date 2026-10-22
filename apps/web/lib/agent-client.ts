@@ -42,7 +42,7 @@ async function requestJson(path: string, options: RequestInit = {}): Promise<unk
 }
 
 /**
- * Loads models and tools and establishes the browser's server session.
+ * Loads models and tools available to the authenticated browser session.
  * @param signal - Optional cancellation signal for the request.
  * @returns Available agent capabilities without model credentials.
  * @throws Error when the catalog cannot be loaded or is invalid.
