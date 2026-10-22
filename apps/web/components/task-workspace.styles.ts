@@ -1,0 +1,78 @@
+/** Layout and content typography for task management; shared controls retain official shadcn variants. */
+const styles = {
+    page: 'workspace-page min-w-0 space-y-6 [&_h1]:[overflow-wrap:anywhere]',
+    listHeader:
+        'workspace-page-header flex flex-wrap items-start justify-between gap-4 [&_p]:mt-2 [&_p]:text-sm [&_p]:text-muted-foreground',
+    primaryButton: '',
+    secondaryButton: '',
+    stopButton: 'min-h-11',
+    toolbar: 'workspace-toolbar flex min-w-0 flex-wrap items-center gap-3',
+    views: 'flex flex-wrap items-center gap-1',
+    search: 'min-w-0 flex-1 basis-full sm:ml-auto sm:basis-auto sm:max-w-sm',
+    refreshButton: '',
+    board: 'grid min-w-0 gap-6 lg:grid-cols-3',
+    completedBoard: 'lg:grid-cols-1',
+    column: 'min-w-0 space-y-3 [&>h2]:flex [&>h2]:items-center [&>h2]:gap-2 [&>h2]:border-b [&>h2]:pb-3 [&>h2]:text-[length:var(--type-subheading)] [&>h2]:font-semibold',
+    cards: 'grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-1',
+    card: 'min-w-0 border-border py-3 shadow-none transition-colors duration-(--motion-fast) hover:bg-muted motion-reduce:transition-none [&>[data-slot=card-content]]:px-4',
+    completeControl: 'mt-1',
+    cardLink:
+        'min-w-0 flex-1 space-y-3 [&_h3]:break-words [&_h3]:text-[length:var(--type-subheading)] [&_h3]:font-semibold [&_p]:line-clamp-3 [&_p]:break-words [&_p]:text-sm [&_p]:text-muted-foreground',
+    cardMeta:
+        'flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground [&>span]:flex [&>span]:items-center [&>span]:gap-1',
+    openTask: 'flex items-center gap-1 text-xs text-muted-foreground',
+    runningLabel: 'h-auto whitespace-normal',
+    empty: 'grid justify-items-center gap-3 px-5 py-8 text-center [&_h2]:text-[length:var(--type-subheading)] [&_h2]:font-semibold [&_p]:max-w-lg [&_p]:text-sm [&_p]:text-muted-foreground',
+    dialog: 'max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl',
+    dialogHeading: 'flex flex-row items-start justify-between gap-4',
+    iconButton: '',
+    creationFields: 'm-0 min-w-0 space-y-4 border-0 p-0 disabled:opacity-60',
+    field: 'grid min-w-0 gap-2',
+    selectWrap: 'min-w-0 [&>[data-slot=native-select-wrapper]]:w-full',
+    hint: 'text-xs leading-relaxed text-muted-foreground',
+    fieldError: 'text-sm text-error-foreground',
+    creationNote: 'my-4',
+    dialogActions: 'mt-4',
+    error: 'my-4',
+    textLink: 'h-auto whitespace-normal',
+    backLink: 'mb-3',
+    detailPage: '',
+    detailHeader: 'workspace-page-header flex min-w-0 flex-wrap items-start justify-between gap-5 [&>div:first-child]:min-w-0',
+    taskIdentity:
+        'mt-3 flex min-w-0 flex-wrap items-center gap-3 text-xs text-muted-foreground [&>span]:flex [&>span]:items-center [&>span]:gap-1 [&>span]:break-all',
+    statusActions: 'flex flex-wrap items-center gap-2',
+    statusHint: 'text-xs leading-relaxed text-muted-foreground',
+    projectMembership: 'min-w-0 rounded-none border-0 border-y bg-transparent py-4 shadow-none [&>[data-slot=card-content]]:px-0',
+    currentProject:
+        'flex min-w-0 flex-wrap items-center gap-3 text-sm [&>span]:text-muted-foreground [&>a]:flex [&>a]:min-w-0 [&>a]:flex-wrap [&>a]:items-center [&>a]:gap-1 [&>a]:break-all',
+    projectControls: 'my-3 flex min-w-0 flex-col gap-3 sm:flex-row [&>div]:flex-1',
+    goal: 'space-y-3 [&_p]:max-h-64 [&_p]:overflow-y-auto [&_p]:whitespace-pre-wrap [&_p]:break-words [&_p]:text-sm [&_p]:leading-relaxed',
+    agentSnapshot: 'space-y-3 text-sm text-muted-foreground',
+    frozenPrompt: 'max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs',
+    conversation: 'mx-auto max-w-3xl space-y-5',
+    conversationHeading:
+        'flex flex-wrap items-center justify-between gap-2 [&_h2]:text-[length:var(--type-subheading)] [&_h2]:font-semibold [&>span]:text-xs [&>span]:text-muted-foreground',
+    conversationEmpty: 'grid justify-items-center gap-3 py-8 text-center text-sm text-muted-foreground',
+    messages: 'space-y-6',
+    userMessage: 'ml-4 space-y-3 sm:ml-10',
+    assistantMessage: 'space-y-3',
+    messageLabel: 'flex flex-wrap items-center gap-3 text-xs font-medium [&>span]:text-muted-foreground',
+    markdown:
+        'conversation-text space-y-3 break-words leading-relaxed [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted [&_pre]:p-4 [&_code]:font-mono [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_th]:border [&_th]:p-2 [&_td]:border [&_td]:p-2 [&_a]:underline [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_img]:max-w-full [&_blockquote]:border-l-2 [&_blockquote]:pl-3',
+    reasoning: 'space-y-2 text-xs text-muted-foreground [&_p]:whitespace-pre-wrap [&_p]:break-words',
+    thinking: 'text-sm text-muted-foreground',
+    messageStatus: '',
+    notice: 'my-4 [&_[data-slot=alert-description]]:flex [&_[data-slot=alert-description]]:flex-wrap [&_[data-slot=alert-description]]:items-center [&_[data-slot=alert-description]]:gap-2',
+    retryBar: 'flex flex-wrap items-center justify-between gap-3 text-sm',
+    startBlock:
+        'flex flex-wrap items-center justify-between gap-4 [&_p]:flex [&_p]:flex-col [&_p]:gap-2 [&_p]:text-sm [&_p>span]:text-xs [&_p>span]:text-muted-foreground',
+    completedNotice: '',
+    composer: 'grid gap-3 pt-3',
+    composerFooter: 'flex flex-wrap items-center justify-between gap-3 [&>span]:text-xs [&>span]:text-muted-foreground',
+    sendButton: 'size-11 rounded-full',
+    loadFeedback:
+        'workspace-page grid min-h-64 justify-items-center content-center gap-4 text-center [&_h1]:text-xl [&_h1]:font-medium [&_p]:text-sm [&_p]:text-muted-foreground',
+    spinner: 'animate-spin motion-reduce:animate-none',
+} as const
+
+export default styles

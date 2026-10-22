@@ -5,19 +5,14 @@ import {
     ArrowRight,
     ArrowUp,
     Bot,
-    Check,
     CheckCheck,
     ChevronDown,
     ChevronRight,
-    Circle,
-    CircleCheck,
     ClipboardList,
-    Folder,
     LoaderCircle,
     Play,
     Plus,
     RotateCcw,
-    Search,
     Square,
     X,
 } from 'lucide-react'
@@ -30,15 +25,14 @@ import type {
     AgentDefinition,
     ChatStatus,
     CreateTask,
-    PersonalProject,
     PersonalTask,
     TaskStatus,
     UpdateTaskStatus,
+    PersonMention,
 } from '@ai-harness/contracts'
 import { createTaskSchema } from '@ai-harness/contracts'
 import { listAgents } from '../lib/agent-client'
 import { getChatStatus } from '../lib/chat-client'
-import { listProjects } from '../lib/project-client'
 import {
     cancelTask,
     createTask,
@@ -47,15 +41,30 @@ import {
     startTask,
     streamTaskMessage,
     updateTaskStatus,
-    updateTaskProject,
     type TaskStreamEvent,
 } from '../lib/task-client'
-import styles from './task-workspace.module.css'
+import styles from './task-workspace.styles'
+import { Button } from './ui/button'
+import { Input } from './ui/input'
+import { SearchInput } from './ui/search-input'
+import { Textarea } from './ui/textarea'
+import { MessageComposer, trimPersonMentions } from './message-composer'
+import { CollaborationSourcePanel } from './collaboration-workspace'
+import { getSourceCollaboration } from '../lib/collaboration-client'
+import { Label } from './ui/label'
+import { NativeSelect, NativeSelectOption } from './ui/native-select'
+import { Checkbox } from './ui/checkbox'
+import { Card, CardContent } from './ui/card'
+import { Badge } from './ui/badge'
+import { FeedbackMessage } from './ui/feedback-message'
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from './ui/collapsible'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog'
+import { useAccount } from './account-context'
 
 type TaskView = 'pending' | 'completed'
 type CreationDraft = { title: string; goal: string; agentId: string }
 type CreationErrors = Partial<Record<'title' | 'goal' | 'agentId', string>>
-type TaskAttempt = { kind: 'start' | 'message'; content: string; requestId: string }
+type TaskAttempt = { kind: 'start' | 'message'; content: string; requestId: string; mentions?: PersonMention[] }
 type ActiveTurn = { requestId: string; stopping: boolean }
 
 const statusLabels: Record<TaskStatus, string> = {
@@ -158,8 +167,8 @@ function stopNotice(task: PersonalTask, requestId: string): string {
  * @param props - Optional saved task identifier for the detail route.
  * @returns The real task list or its persisted conversation workspace.
  */
-export function TaskWorkspace({ taskId }: { taskId?: string }) {
-    return taskId ? <TaskDetail key={taskId} taskId={taskId} /> : <TaskList />
+export function TaskWorkspace({ taskId, eventId }: { taskId?: string; eventId?: string }) {
+    return taskId ? <TaskDetail key={taskId} taskId={taskId} eventId={eventId} /> : <TaskList />
 }
 
 /**
@@ -169,24 +178,18 @@ export function TaskWorkspace({ taskId }: { taskId?: string }) {
  */
 function LoadFeedback({ error, onRetry }: { error: string; onRetry: () => void }) {
     return (
-        <div className={styles.loadFeedback} role={error ? 'alert' : 'status'}>
-            {error ? (
-                <ClipboardList size={28} aria-hidden="true" />
-            ) : (
-                <LoaderCircle className={styles.spinner} size={23} aria-hidden="true" />
-            )}
-            <h1>{error ? '暂时无法载入任务' : '正在载入任务'}</h1>
-            <p>{error || '正在读取当前工作区的任务记录。'}</p>
+        <div className={styles.loadFeedback}>
+            <FeedbackMessage variant={error ? 'error' : 'loading'}>{error || '正在读取当前工作区的任务记录。'}</FeedbackMessage>
             {error && (
                 <>
-                    <button type="button" className={styles.secondaryButton} onClick={onRetry}>
+                    <Button variant="outline" type="button" className={styles.secondaryButton} onClick={onRetry}>
                         <RotateCcw size={15} aria-hidden="true" />
                         重新载入
-                    </button>
-                    <Link href="/inbox" className={styles.textLink}>
+                    </Button>
+                    <Button variant="link" nativeButton={false} render={<Link href="/inbox" />} className={styles.textLink}>
                         返回个人任务
                         <ArrowRight size={14} aria-hidden="true" />
-                    </Link>
+                    </Button>
                 </>
             )}
         </div>
@@ -195,7 +198,7 @@ function LoadFeedback({ error, onRetry }: { error: string; onRetry: () => void }
 
 /**
  * Displays the real task collection with search, work views, and task creation.
- * @returns Scoped task cards, honest storage feedback, and an accessible creation dialog.
+ * @returns Scoped task cards, work filters, and an accessible creation dialog.
  */
 function TaskList() {
     const router = useRouter()
@@ -225,13 +228,16 @@ function TaskList() {
     useEffect(() => {
         const controller = new AbortController()
         /**
-         * Establishes the signed identity before reading task and agent collections.
+         * Loads independent model status, tasks, and agent collections together.
          * @returns A promise settled after the current user's records are loaded.
          */
         async function load() {
             try {
-                const connection = await getChatStatus(controller.signal)
-                const [items, profiles] = await Promise.all([listTasks(controller.signal), listAgents(controller.signal)])
+                const [connection, items, profiles] = await Promise.all([
+                    getChatStatus(controller.signal),
+                    listTasks(controller.signal),
+                    listAgents(controller.signal),
+                ])
                 if (controller.signal.aborted) return
                 setTasks(recentTasks(items))
                 setAgents(profiles)
@@ -314,45 +320,43 @@ function TaskList() {
         <section className={styles.page}>
             <header className={styles.listHeader}>
                 <div>
-                    <div className={styles.eyebrow}>
-                        <ClipboardList size={16} aria-hidden="true" /> PERSONAL TASKS
-                    </div>
                     <h1>个人任务</h1>
                     <p>给工作一个明确的目标，和 Agent 一起推进。</p>
                 </div>
-                <button ref={openerRef} type="button" className={styles.primaryButton} onClick={openCreation}>
+                <Button ref={openerRef} type="button" className={styles.primaryButton} onClick={openCreation}>
                     <Plus size={16} aria-hidden="true" />
                     新建任务
-                </button>
+                </Button>
             </header>
-            {status?.storage === 'memory' && (
-                <p className={styles.storageNotice}>当前为临时存储：刷新和返回页面会保留记录，重启服务会清空任务及对话。</p>
-            )}
             <div className={styles.toolbar}>
                 <div className={styles.views} role="group" aria-label="任务视图">
-                    <button
+                    <Button
                         type="button"
-                        className={view === 'pending' ? styles.activeView : ''}
+                        variant={view === 'pending' ? 'secondary' : 'ghost'}
                         aria-pressed={view === 'pending'}
                         onClick={() => setView('pending')}
                     >
-                        待办<span>{pendingCount}</span>
-                    </button>
-                    <button
+                        待办<Badge variant="outline">{pendingCount}</Badge>
+                    </Button>
+                    <Button
                         type="button"
-                        className={view === 'completed' ? styles.activeView : ''}
+                        variant={view === 'completed' ? 'secondary' : 'ghost'}
                         aria-pressed={view === 'completed'}
                         onClick={() => setView('completed')}
                     >
-                        已完成<span>{completedCount}</span>
-                    </button>
+                        已完成<Badge variant="outline">{completedCount}</Badge>
+                    </Button>
                 </div>
-                <label className={styles.search}>
-                    <Search size={16} aria-hidden="true" />
-                    <span className="sr-only">搜索任务名称或目标</span>
-                    <input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称或目标" />
-                </label>
-                <button
+                <SearchInput
+                    containerClassName={styles.search}
+                    aria-label="搜索任务名称或目标"
+                    value={query}
+                    onValueChange={setQuery}
+                    placeholder="搜索名称或目标"
+                />
+                <Button
+                    size="icon"
+                    variant="ghost"
                     type="button"
                     className={styles.refreshButton}
                     aria-label="刷新任务列表"
@@ -361,19 +365,18 @@ function TaskList() {
                     onClick={reloadTasks}
                 >
                     <RotateCcw size={15} aria-hidden="true" />
-                </button>
+                </Button>
             </div>
             {mutationError && (
-                <div className={styles.error} role="alert">
+                <FeedbackMessage variant="error" className={styles.error} role="alert">
                     <p>{mutationError}</p>
                     <span>原状态已保留，可以再次点击完成或恢复。</span>
-                </div>
+                </FeedbackMessage>
             )}
             {mutationNotice && (
-                <p className={styles.notice} role="status">
-                    <Check size={14} aria-hidden="true" />
+                <FeedbackMessage variant="success" className={styles.notice} role="status">
                     {mutationNotice}
-                </p>
+                </FeedbackMessage>
             )}
             {visible.length === 0 ? (
                 <div className={styles.empty}>
@@ -387,15 +390,15 @@ function TaskList() {
                               : '创建任务，选好助手，再由你决定何时开始执行。'}
                     </p>
                     {search ? (
-                        <button type="button" className={styles.secondaryButton} onClick={() => setQuery('')}>
+                        <Button variant="outline" type="button" className={styles.secondaryButton} onClick={() => setQuery('')}>
                             清空搜索
-                        </button>
+                        </Button>
                     ) : (
                         view === 'pending' && (
-                            <button type="button" className={styles.secondaryButton} onClick={openCreation}>
+                            <Button variant="outline" type="button" className={styles.secondaryButton} onClick={openCreation}>
                                 <Plus size={15} aria-hidden="true" />
                                 创建第一个任务
-                            </button>
+                            </Button>
                         )
                     )}
                 </div>
@@ -404,56 +407,52 @@ function TaskList() {
                     {(view === 'completed' ? ['completed' as TaskStatus] : pendingStatuses).map(workStatus => (
                         <section className={styles.column} key={workStatus} aria-labelledby={`task-column-${workStatus}`}>
                             <h2 id={`task-column-${workStatus}`}>
-                                <span className={styles.statusDot} data-status={workStatus} />
-                                {statusLabels[workStatus]}
-                                <span>{visible.filter(task => task.task.status === workStatus).length}</span>
+                                <Badge variant="secondary">{statusLabels[workStatus]}</Badge>
+                                <Badge variant="outline">{visible.filter(task => task.task.status === workStatus).length}</Badge>
                             </h2>
                             <div className={styles.cards}>
                                 {visible
                                     .filter(task => task.task.status === workStatus)
                                     .map(task => (
-                                        <article className={styles.card} key={task.id}>
-                                            <button
-                                                type="button"
-                                                className={styles.completeControl}
-                                                aria-label={`${task.task.status === 'completed' ? '恢复' : '完成'}任务：${task.title}`}
-                                                title={
-                                                    task.activeRequestId
-                                                        ? '生成期间不能修改状态'
-                                                        : task.task.status === 'completed'
-                                                          ? '恢复任务'
-                                                          : '标记完成'
-                                                }
-                                                disabled={Boolean(changingId) || Boolean(task.activeRequestId)}
-                                                onClick={() => toggleCompleted(task)}
-                                            >
-                                                {changingId === task.id ? (
-                                                    <LoaderCircle size={18} className={styles.spinner} aria-hidden="true" />
-                                                ) : task.task.status === 'completed' ? (
-                                                    <CircleCheck size={19} aria-hidden="true" />
-                                                ) : (
-                                                    <Circle size={19} aria-hidden="true" />
-                                                )}
-                                            </button>
-                                            <Link href={`/inbox/${encodeURIComponent(task.id)}`} className={styles.cardLink}>
-                                                <h3>{task.title}</h3>
-                                                <p>{task.task.goal}</p>
-                                                <div className={styles.cardMeta}>
-                                                    <span>
-                                                        <Bot size={13} aria-hidden="true" />
-                                                        {task.agent.name}
+                                        <Card className={styles.card} key={task.id}>
+                                            <CardContent className="flex min-w-0 items-start gap-3">
+                                                <Checkbox
+                                                    className={styles.completeControl}
+                                                    checked={task.task.status === 'completed'}
+                                                    aria-label={`${task.task.status === 'completed' ? '恢复' : '完成'}任务：${task.title}`}
+                                                    aria-busy={changingId === task.id}
+                                                    title={
+                                                        task.activeRequestId
+                                                            ? '生成期间不能修改状态'
+                                                            : task.task.status === 'completed'
+                                                              ? '恢复任务'
+                                                              : '标记完成'
+                                                    }
+                                                    disabled={Boolean(changingId) || Boolean(task.activeRequestId)}
+                                                    onCheckedChange={() => void toggleCompleted(task)}
+                                                />
+                                                <Link href={`/inbox/${encodeURIComponent(task.id)}`} className={styles.cardLink}>
+                                                    <h3>{task.title}</h3>
+                                                    <p>{task.task.goal}</p>
+                                                    <div className={styles.cardMeta}>
+                                                        <span>
+                                                            <Bot size={13} aria-hidden="true" />
+                                                            {task.agent.name}
+                                                        </span>
+                                                        <time dateTime={task.updatedAt}>{updatedLabel(task.updatedAt)}</time>
+                                                    </div>
+                                                    {task.activeRequestId && (
+                                                        <Badge variant="secondary" className={styles.runningLabel}>
+                                                            正在执行，结束后可修改状态
+                                                        </Badge>
+                                                    )}
+                                                    <span className={styles.openTask}>
+                                                        打开任务
+                                                        <ChevronRight size={13} aria-hidden="true" />
                                                     </span>
-                                                    <time dateTime={task.updatedAt}>{updatedLabel(task.updatedAt)}</time>
-                                                </div>
-                                                {task.activeRequestId && (
-                                                    <span className={styles.runningLabel}>正在执行，结束后可修改状态</span>
-                                                )}
-                                                <span className={styles.openTask}>
-                                                    打开任务
-                                                    <ChevronRight size={13} aria-hidden="true" />
-                                                </span>
-                                            </Link>
-                                        </article>
+                                                </Link>
+                                            </CardContent>
+                                        </Card>
                                     ))}
                             </div>
                         </section>
@@ -487,21 +486,14 @@ export function TaskCreationDialog({
     projectId?: string
     projectName?: string
 }) {
+    const { modelLabel } = useAccount()
     const [draft, setDraft] = useState<CreationDraft>({ title: '', goal: '', agentId: '' })
     const [fieldErrors, setFieldErrors] = useState<CreationErrors>({})
     const [createError, setCreateError] = useState('')
     const [creating, setCreating] = useState(false)
-    const dialogRef = useRef<HTMLDialogElement>(null)
     const titleRef = useRef<HTMLInputElement>(null)
     const createAttempt = useRef<{ fingerprint: string; requestId: string } | null>(null)
     const creatingNow = useRef(false)
-
-    useEffect(() => {
-        if (open) {
-            dialogRef.current?.showModal()
-            titleRef.current?.focus()
-        } else dialogRef.current?.close()
-    }, [open])
 
     /**
      * Closes an idle creation form and returns focus to its triggering action.
@@ -509,7 +501,6 @@ export function TaskCreationDialog({
      */
     function closeCreation() {
         if (creating) return
-        dialogRef.current?.close()
         onClose()
     }
 
@@ -563,7 +554,6 @@ export function TaskCreationDialog({
         creatingNow.current = true
         try {
             const saved = await createTask(result.data)
-            dialogRef.current?.close()
             onCreated(saved)
         } catch (error) {
             setCreateError(errorMessage(error))
@@ -574,126 +564,142 @@ export function TaskCreationDialog({
     }
 
     return (
-        <dialog
-            ref={dialogRef}
-            className={styles.dialog}
-            aria-labelledby="task-create-heading"
-            onCancel={event => {
-                if (creating) event.preventDefault()
+        <Dialog
+            open={open}
+            onOpenChange={(nextOpen, event) => {
+                if (!nextOpen) {
+                    if (creatingNow.current) event.cancel()
+                    else closeCreation()
+                }
             }}
-            onClose={closeCreation}
         >
-            <header className={styles.dialogHeading}>
-                <div>
-                    <span className={styles.eyebrow}>NEW TASK</span>
-                    <h2 id="task-create-heading">{projectId ? '在项目中新建任务' : '新建个人任务'}</h2>
-                </div>
-                <button type="button" className={styles.iconButton} aria-label="关闭新建任务" disabled={creating} onClick={closeCreation}>
-                    <X size={19} aria-hidden="true" />
-                </button>
-            </header>
-            <form onSubmit={saveTask} noValidate>
-                <fieldset disabled={creating} className={styles.creationFields}>
-                    <div className={styles.field}>
-                        <label htmlFor="task-create-title">
-                            任务名称 <span aria-hidden="true">*</span>
-                        </label>
-                        <input
-                            ref={titleRef}
-                            id="task-create-title"
-                            name="title"
-                            value={draft.title}
-                            maxLength={120}
-                            required
-                            placeholder="例如：比较三个候选方案"
-                            aria-invalid={Boolean(fieldErrors.title)}
-                            aria-describedby={fieldErrors.title ? 'task-create-title-error' : undefined}
-                            onChange={event => {
-                                setDraft(current => ({ ...current, title: event.target.value }))
-                                setCreateError('')
-                            }}
-                            onBlur={() => validateCreationField('title')}
-                        />
-                        {fieldErrors.title && (
-                            <p className={styles.fieldError} id="task-create-title-error">
-                                {fieldErrors.title}
-                            </p>
-                        )}
+            <DialogContent initialFocus={titleRef} showCloseButton={false} className={styles.dialog}>
+                <DialogHeader className={styles.dialogHeading}>
+                    <div>
+                        <DialogTitle id="task-create-heading">{projectId ? '在项目中新建任务' : '新建个人任务'}</DialogTitle>
                     </div>
-                    <div className={styles.field}>
-                        <label htmlFor="task-create-goal">
-                            任务目标 <span aria-hidden="true">*</span>
-                        </label>
-                        <textarea
-                            id="task-create-goal"
-                            name="goal"
-                            value={draft.goal}
-                            rows={6}
-                            maxLength={32000}
-                            required
-                            placeholder="说明你想解决的问题、已有背景，以及希望得到的结果。"
-                            aria-invalid={Boolean(fieldErrors.goal)}
-                            aria-describedby={fieldErrors.goal ? 'task-create-goal-error' : 'task-create-goal-hint'}
-                            onChange={event => {
-                                setDraft(current => ({ ...current, goal: event.target.value }))
-                                setCreateError('')
-                            }}
-                            onBlur={() => validateCreationField('goal')}
-                        />
-                        <p className={styles.hint} id="task-create-goal-hint">
-                            目标将作为首次执行的请求，后续可以在对话中补充背景。
-                        </p>
-                        {fieldErrors.goal && (
-                            <p className={styles.fieldError} id="task-create-goal-error">
-                                {fieldErrors.goal}
-                            </p>
-                        )}
-                    </div>
-                    <div className={styles.field}>
-                        <label htmlFor="task-create-agent">使用的 Agent</label>
-                        <div className={styles.selectWrap}>
-                            <select
-                                id="task-create-agent"
-                                value={draft.agentId}
-                                onChange={event => setDraft(current => ({ ...current, agentId: event.target.value }))}
-                            >
-                                <option value="">通用助手 · {status?.model}</option>
-                                {agents.map(agent => (
-                                    <option value={agent.id} key={agent.id}>
-                                        {agent.name} · {agent.modelId}
-                                    </option>
-                                ))}
-                            </select>
-                            <ChevronDown size={15} aria-hidden="true" />
+                    <Button
+                        size="icon"
+                        variant="ghost"
+                        type="button"
+                        className={styles.iconButton}
+                        aria-label="关闭新建任务"
+                        disabled={creating}
+                        onClick={closeCreation}
+                    >
+                        <X size={19} aria-hidden="true" />
+                    </Button>
+                </DialogHeader>
+                <DialogDescription>填写目标与助手后保存任务，开始执行才会调用模型。</DialogDescription>
+                <form onSubmit={saveTask} noValidate>
+                    <fieldset disabled={creating} className={styles.creationFields}>
+                        <div className={styles.field}>
+                            <Label htmlFor="task-create-title">
+                                任务名称 <span aria-hidden="true">*</span>
+                            </Label>
+                            <Input
+                                ref={titleRef}
+                                id="task-create-title"
+                                name="title"
+                                value={draft.title}
+                                maxLength={120}
+                                required
+                                placeholder="例如：比较三个候选方案"
+                                aria-invalid={Boolean(fieldErrors.title)}
+                                aria-describedby={fieldErrors.title ? 'task-create-title-error' : undefined}
+                                onChange={event => {
+                                    setDraft(current => ({ ...current, title: event.target.value }))
+                                    setCreateError('')
+                                }}
+                                onBlur={() => validateCreationField('title')}
+                            />
+                            {fieldErrors.title && (
+                                <p className={styles.fieldError} id="task-create-title-error">
+                                    {fieldErrors.title}
+                                </p>
+                            )}
                         </div>
-                        <p className={styles.hint}>任务会保留创建时的助手配置，之后编辑 Agent 不会改变它。</p>
-                        {fieldErrors.agentId && <p className={styles.fieldError}>{fieldErrors.agentId}</p>}
-                    </div>
-                </fieldset>
-                <p className={styles.creationNote}>
-                    {projectId && <>任务将归入“{projectName || '当前项目'}”。</>}创建只保存任务。进入任务后，点击“开始执行”才会调用模型。
-                </p>
-                {createError && (
-                    <div className={styles.error} role="alert">
-                        <p>{createError}</p>
-                        <span>输入已保留。直接重试不会重复创建同一个任务。</span>
-                    </div>
-                )}
-                <div className={styles.dialogActions}>
-                    <button type="button" className={styles.secondaryButton} disabled={creating} onClick={closeCreation}>
-                        暂时取消
-                    </button>
-                    <button type="submit" className={styles.primaryButton} disabled={creating}>
-                        {creating ? (
-                            <LoaderCircle size={16} className={styles.spinner} aria-hidden="true" />
-                        ) : (
-                            <ArrowRight size={16} aria-hidden="true" />
-                        )}
-                        {creating ? '正在保存' : '创建任务'}
-                    </button>
-                </div>
-            </form>
-        </dialog>
+                        <div className={styles.field}>
+                            <Label htmlFor="task-create-goal">
+                                任务目标 <span aria-hidden="true">*</span>
+                            </Label>
+                            <Textarea
+                                id="task-create-goal"
+                                name="goal"
+                                value={draft.goal}
+                                rows={6}
+                                maxLength={32000}
+                                required
+                                placeholder="说明你想解决的问题、已有背景，以及希望得到的结果。"
+                                aria-invalid={Boolean(fieldErrors.goal)}
+                                aria-describedby={fieldErrors.goal ? 'task-create-goal-error' : 'task-create-goal-hint'}
+                                onChange={event => {
+                                    setDraft(current => ({ ...current, goal: event.target.value }))
+                                    setCreateError('')
+                                }}
+                                onBlur={() => validateCreationField('goal')}
+                            />
+                            <p className={styles.hint} id="task-create-goal-hint">
+                                目标将作为首次执行的请求，后续可以在对话中补充背景。
+                            </p>
+                            {fieldErrors.goal && (
+                                <p className={styles.fieldError} id="task-create-goal-error">
+                                    {fieldErrors.goal}
+                                </p>
+                            )}
+                        </div>
+                        <div className={styles.field}>
+                            <Label htmlFor="task-create-agent">使用的 Agent</Label>
+                            <div className={styles.selectWrap}>
+                                <NativeSelect
+                                    id="task-create-agent"
+                                    value={draft.agentId}
+                                    onChange={event => setDraft(current => ({ ...current, agentId: event.target.value }))}
+                                >
+                                    <NativeSelectOption value="">通用助手 · {modelLabel(status?.model)}</NativeSelectOption>
+                                    {agents.map(agent => (
+                                        <NativeSelectOption value={agent.id} key={agent.id}>
+                                            {agent.name} · {modelLabel(agent.modelId)}
+                                        </NativeSelectOption>
+                                    ))}
+                                </NativeSelect>
+                            </div>
+                            <p className={styles.hint}>任务会保留创建时的助手配置，之后编辑 Agent 不会改变它。</p>
+                            {fieldErrors.agentId && <p className={styles.fieldError}>{fieldErrors.agentId}</p>}
+                        </div>
+                    </fieldset>
+                    <FeedbackMessage variant="info" className={styles.creationNote}>
+                        {projectId && <>任务将归入“{projectName || '当前项目'}”。</>}
+                        创建只保存任务。进入任务后，点击“开始执行”才会调用模型。
+                    </FeedbackMessage>
+                    {createError && (
+                        <FeedbackMessage variant="error" className={styles.error} role="alert">
+                            <p>{createError}</p>
+                            <span>输入已保留。直接重试不会重复创建同一个任务。</span>
+                        </FeedbackMessage>
+                    )}
+                    <DialogFooter className={styles.dialogActions}>
+                        <Button
+                            variant="outline"
+                            type="button"
+                            className={styles.secondaryButton}
+                            disabled={creating}
+                            onClick={closeCreation}
+                        >
+                            暂时取消
+                        </Button>
+                        <Button type="submit" className={styles.primaryButton} disabled={creating}>
+                            {creating ? (
+                                <LoaderCircle size={16} className={styles.spinner} aria-hidden="true" />
+                            ) : (
+                                <ArrowRight size={16} aria-hidden="true" />
+                            )}
+                            {creating ? '正在保存' : '创建任务'}
+                        </Button>
+                    </DialogFooter>
+                </form>
+            </DialogContent>
+        </Dialog>
     )
 }
 
@@ -702,18 +708,17 @@ export function TaskCreationDialog({
  * @param props - Stable task identifier supplied by the route.
  * @returns Work controls, durable history, and a recoverable streaming composer.
  */
-function TaskDetail({ taskId }: { taskId: string }) {
+function TaskDetail({ taskId, eventId }: { taskId: string; eventId?: string }) {
+    const { modelLabel } = useAccount()
     const [task, setTask] = useState<PersonalTask | null>(null)
-    const [projects, setProjects] = useState<PersonalProject[]>([])
-    const [projectTarget, setProjectTarget] = useState('')
-    const [projectError, setProjectError] = useState('')
-    const [projectNotice, setProjectNotice] = useState('')
-    const [changingProject, setChangingProject] = useState(false)
+    const router = useRouter()
+    const redirect = useRef(router.replace)
     const [connection, setConnection] = useState<ChatStatus | null>(null)
     const [loading, setLoading] = useState(true)
     const [loadError, setLoadError] = useState('')
     const [reload, setReload] = useState(0)
     const [draft, setDraft] = useState('')
+    const [draftMentions, setDraftMentions] = useState<PersonMention[]>([])
     const [actionError, setActionError] = useState('')
     const [activeTurn, setActiveTurn] = useState<ActiveTurn | null>(null)
     const [changingStatus, setChangingStatus] = useState(false)
@@ -724,13 +729,11 @@ function TaskDetail({ taskId }: { taskId: string }) {
     const running = useRef<{ controller: AbortController; attempt: TaskAttempt } | null>(null)
     const cancellation = useRef<Promise<PersonalTask> | null>(null)
     const statusBusy = useRef(false)
-    const projectBusy = useRef(false)
     const mounted = useRef(true)
     const composerRef = useRef<HTMLTextAreaElement>(null)
     const endRef = useRef<HTMLDivElement>(null)
     const busy = Boolean(activeTurn || task?.activeRequestId)
     const completed = task?.task.status === 'completed'
-    const currentProject = projects.find(project => project.id === task?.task.projectId)
 
     useEffect(() => {
         mounted.current = true
@@ -743,18 +746,23 @@ function TaskDetail({ taskId }: { taskId: string }) {
     useEffect(() => {
         const controller = new AbortController()
         /**
-         * Establishes the identity before reading the stable task and its saved history.
+         * Loads independent model status and the stable task together.
          * @returns A promise settled after the task is loaded or its failure is visible.
          */
         async function load() {
             try {
-                const status = await getChatStatus(controller.signal)
-                const [saved, projectList] = await Promise.all([getTask(taskId, controller.signal), listProjects(controller.signal)])
+                const [status, saved] = await Promise.all([getChatStatus(controller.signal), getTask(taskId, controller.signal)])
                 if (controller.signal.aborted) return
+                const collaboration = await getSourceCollaboration({ kind: 'task', id: taskId }, 0, controller.signal).catch(
+                    () => undefined
+                )
+                if (controller.signal.aborted) return
+                if (collaboration?.nodes.some(node => node.canWork && node.upstreamNodeId && node.source?.id === taskId)) {
+                    redirect.current(`/?${new URLSearchParams({ conversation: taskId, ...(eventId ? { event: eventId } : {}) })}`)
+                    return
+                }
                 setConnection(status)
                 setTask(saved)
-                setProjects(projectList)
-                setProjectTarget(saved.task.projectId ?? '')
                 setRetry(latestRetry(saved))
                 setLoadError('')
                 setDraft(current => current || readDraft(taskId))
@@ -766,7 +774,7 @@ function TaskDetail({ taskId }: { taskId: string }) {
         }
         void load()
         return () => controller.abort()
-    }, [taskId, reload])
+    }, [taskId, reload, eventId])
 
     useEffect(() => {
         if (!task?.activeRequestId || activeTurn || remoteStopping) return
@@ -811,7 +819,7 @@ function TaskDetail({ taskId }: { taskId: string }) {
      * @returns Nothing; starts a fresh read without changing the user's draft.
      */
     function reloadTask() {
-        if (running.current || projectBusy.current) return
+        if (running.current) return
         setLoading(true)
         setLoadError('')
         setActionError('')
@@ -909,15 +917,16 @@ function TaskDetail({ taskId }: { taskId: string }) {
      * @returns A promise settled after generation, recovery, or a visible recoverable failure.
      */
     async function execute(attempt?: TaskAttempt) {
-        if (!task || running.current || task.activeRequestId || statusBusy.current || projectBusy.current || completed) return
+        if (!task || running.current || task.activeRequestId || statusBusy.current || completed) return
         if (!connection?.configured) {
-            setActionError('DeepSeek 尚未配置。请完成服务端配置，再重新载入任务。')
+            setActionError('尚无可用模型。请到账户设置添加模型连接，再重新载入任务。')
             return
         }
         const next: TaskAttempt = attempt ?? {
             kind: task.task.started ? 'message' : 'start',
             content: task.task.started ? draft.trim() : task.task.goal,
             requestId: crypto.randomUUID(),
+            ...(task.task.started && draftMentions.length ? { mentions: trimPersonMentions(draft, draftMentions) } : {}),
         }
         if (!next.content.trim()) return
         const controller = new AbortController()
@@ -941,7 +950,8 @@ function TaskDetail({ taskId }: { taskId: string }) {
                 applyEvent(event, next)
             }
             if (next.kind === 'start') await startTask(taskId, next.requestId, receive, controller.signal)
-            else await streamTaskMessage(taskId, next.content, next.requestId, receive, controller.signal)
+            else await streamTaskMessage(taskId, next.content, next.requestId, receive, controller.signal, next.mentions)
+            setDraftMentions([])
             if (providerError) throw new Error(providerError)
         } catch (error) {
             if (!mounted.current) return
@@ -1010,7 +1020,7 @@ function TaskDetail({ taskId }: { taskId: string }) {
      * @returns A promise settled after the server confirms or rejects the mutation.
      */
     async function changeStatus(input: UpdateTaskStatus) {
-        if (!task || busy || statusBusy.current || projectBusy.current) return
+        if (!task || busy || statusBusy.current) return
         statusBusy.current = true
         setChangingStatus(true)
         setActionError('')
@@ -1028,45 +1038,14 @@ function TaskDetail({ taskId }: { taskId: string }) {
         }
     }
 
-    /**
-     * Saves one confirmed project membership change without replacing task context optimistically.
-     * @param event - Membership form submission for moving or removing the task.
-     * @returns A promise settled after saved membership or nearby recoverable failure feedback.
-     */
-    async function changeProject(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault()
-        if (!task || busy || statusBusy.current || projectBusy.current || projectTarget === (task.task.projectId ?? '')) return
-        projectBusy.current = true
-        setChangingProject(true)
-        setProjectError('')
-        setProjectNotice('')
-        try {
-            const saved = await updateTaskProject(taskId, { projectId: projectTarget || null })
-            setTask(saved)
-            setProjectTarget(saved.task.projectId ?? '')
-            setRetry(latestRetry(saved))
-            const project = projects.find(item => item.id === saved.task.projectId)
-            setProjectNotice(
-                saved.task.projectId
-                    ? `已归入“${project?.name ?? '项目'} · ${saved.task.projectId.slice(0, 8)}”。`
-                    : '已移出项目，任务仍保留在个人任务中。'
-            )
-        } catch (error) {
-            setProjectError(errorMessage(error))
-        } finally {
-            projectBusy.current = false
-            setChangingProject(false)
-        }
-    }
-
     if (loading || loadError || !task) return <LoadFeedback error={loadError} onRetry={reloadTask} />
 
     return (
         <section className={`${styles.page} ${styles.detailPage}`}>
-            <Link href="/inbox" className={styles.backLink}>
+            <Button variant="link" nativeButton={false} render={<Link href="/inbox" />} className={styles.backLink}>
                 <ArrowLeft size={15} aria-hidden="true" />
                 个人任务
-            </Link>
+            </Button>
             <header className={styles.detailHeader}>
                 <div>
                     <h1>{task.title}</h1>
@@ -1075,152 +1054,49 @@ function TaskDetail({ taskId }: { taskId: string }) {
                             <Bot size={14} aria-hidden="true" />
                             {task.agent.name}
                         </span>
-                        <span>{task.agent.modelId}</span>
-                        <span>创建时的助手配置</span>
                     </div>
                 </div>
                 <div className={styles.statusActions}>
-                    <label className={styles.selectWrap}>
+                    <Label className={styles.selectWrap}>
                         <span className="sr-only">任务工作状态</span>
-                        <select
+                        <NativeSelect
                             value={task.task.status}
-                            disabled={busy || changingStatus || changingProject || completed}
+                            disabled={busy || changingStatus || completed}
                             aria-describedby="task-status-hint"
                             onChange={event => changeStatus({ status: event.target.value as TaskStatus })}
                         >
                             {Object.entries(statusLabels).map(([value, label]) => (
-                                <option value={value} key={value}>
+                                <NativeSelectOption value={value} key={value}>
                                     {label}
-                                </option>
+                                </NativeSelectOption>
                             ))}
-                        </select>
-                        <ChevronDown size={14} aria-hidden="true" />
-                    </label>
+                        </NativeSelect>
+                    </Label>
                     {completed ? (
-                        <button
+                        <Button
+                            variant="outline"
                             type="button"
                             className={styles.secondaryButton}
-                            disabled={busy || changingStatus || changingProject}
+                            disabled={busy || changingStatus}
                             onClick={() => changeStatus({ restore: true })}
                         >
                             <RotateCcw size={15} aria-hidden="true" />
                             {changingStatus ? '正在恢复' : '恢复任务'}
-                        </button>
+                        </Button>
                     ) : (
-                        <button
+                        <Button
+                            variant="outline"
                             type="button"
                             className={styles.secondaryButton}
-                            disabled={busy || changingStatus || changingProject}
+                            disabled={busy || changingStatus}
                             onClick={() => changeStatus({ status: 'completed' })}
                         >
                             <CheckCheck size={16} aria-hidden="true" />
                             {changingStatus ? '正在保存' : '标记完成'}
-                        </button>
+                        </Button>
                     )}
                 </div>
             </header>
-            <p id="task-status-hint" className={styles.statusHint}>
-                {busy
-                    ? '正在生成回复，停止或等待结束后才能修改工作状态。'
-                    : completed
-                      ? '任务已完成，历史仍可查看。恢复任务后可继续执行。'
-                      : '工作状态由你决定；一次回复结束不会自动完成任务。'}
-            </p>
-            {connection?.storage === 'memory' && (
-                <p className={styles.storageNotice}>当前为临时存储：刷新和返回页面会保留记录，重启服务会清空任务及对话。</p>
-            )}
-            <section className={styles.projectMembership} aria-label="任务项目归属">
-                <div className={styles.currentProject}>
-                    <span>所属项目</span>
-                    {task.task.projectId ? (
-                        <Link href={`/projects/${encodeURIComponent(task.task.projectId)}`}>
-                            <Folder size={15} aria-hidden="true" />
-                            {currentProject?.name ?? '项目'}
-                            <span>· {task.task.projectId.slice(0, 8)}</span>
-                            <ArrowRight size={13} aria-hidden="true" />
-                        </Link>
-                    ) : (
-                        <strong>未归组</strong>
-                    )}
-                </div>
-                <form onSubmit={changeProject}>
-                    <label htmlFor="task-project-target">移动到项目</label>
-                    <div className={styles.projectControls}>
-                        <div className={styles.selectWrap}>
-                            <select
-                                id="task-project-target"
-                                value={projectTarget}
-                                disabled={busy || changingStatus || changingProject}
-                                aria-describedby="task-project-hint"
-                                onChange={event => {
-                                    setProjectTarget(event.target.value)
-                                    setProjectError('')
-                                    setProjectNotice('')
-                                }}
-                            >
-                                <option value="">未归组</option>
-                                {projects.map(project => (
-                                    <option value={project.id} key={project.id}>
-                                        {project.name} · {project.description ? `${project.description.slice(0, 30)} · ` : ''}
-                                        {project.id.slice(0, 8)}
-                                    </option>
-                                ))}
-                            </select>
-                            <ChevronDown size={14} aria-hidden="true" />
-                        </div>
-                        <button
-                            type="submit"
-                            className={styles.secondaryButton}
-                            disabled={busy || changingStatus || changingProject || projectTarget === (task.task.projectId ?? '')}
-                        >
-                            {changingProject ? (
-                                <LoaderCircle className={styles.spinner} size={14} aria-hidden="true" />
-                            ) : (
-                                <Check size={14} aria-hidden="true" />
-                            )}
-                            {changingProject ? '正在保存' : '保存归属'}
-                        </button>
-                    </div>
-                    <p id="task-project-hint" className={styles.hint}>
-                        {busy
-                            ? '正在生成回复，停止或等待结束后才能修改项目归属。'
-                            : '移动会保留本任务的目标、助手、状态和对话。选择“未归组”可移出项目。'}
-                    </p>
-                </form>
-                {projectError && (
-                    <div className={styles.error} role="alert">
-                        <p>{projectError}</p>
-                        <span>当前仍展示上次确认的归属，可以重试或重新载入确认。</span>
-                    </div>
-                )}
-                {projectNotice && (
-                    <p className={styles.notice} role="status">
-                        <Check size={14} aria-hidden="true" />
-                        {projectNotice}
-                    </p>
-                )}
-            </section>
-            <details className={styles.goal} open>
-                <summary>
-                    <ClipboardList size={16} aria-hidden="true" />
-                    任务目标
-                    <ChevronDown size={15} aria-hidden="true" />
-                </summary>
-                <p>{task.task.goal}</p>
-            </details>
-            <details className={styles.agentSnapshot}>
-                <summary>
-                    查看助手配置
-                    <ChevronDown size={14} aria-hidden="true" />
-                </summary>
-                <p>
-                    工具：
-                    {task.agent.toolIds.length
-                        ? task.agent.toolIds.map(id => (id === 'calculator' ? '计算器' : '当前时间')).join('、')
-                        : '未启用工具'}
-                </p>
-                <p className={styles.frozenPrompt}>{task.agent.systemPrompt || '通用助手默认提示词'}</p>
-            </details>
             <div className={styles.conversation} aria-label="任务对话">
                 <div className={styles.conversationHeading}>
                     <h2>任务对话</h2>
@@ -1243,10 +1119,16 @@ function TaskDetail({ taskId }: { taskId: string }) {
                                 )}
                             </div>
                             {message.reasoning && (
-                                <details className={styles.reasoning}>
-                                    <summary>思考过程</summary>
-                                    <p>{message.reasoning}</p>
-                                </details>
+                                <Collapsible className={styles.reasoning}>
+                                    <CollapsibleTrigger
+                                        render={<Button variant="ghost" className="w-full justify-start [&>svg:last-child]:ml-auto" />}
+                                    >
+                                        思考过程
+                                    </CollapsibleTrigger>
+                                    <CollapsibleContent>
+                                        <p>{message.reasoning}</p>
+                                    </CollapsibleContent>
+                                </Collapsible>
                             )}
                             {message.content ? (
                                 <div className={styles.markdown}>
@@ -1260,18 +1142,33 @@ function TaskDetail({ taskId }: { taskId: string }) {
                                 <p className={styles.hint}>{message.status === 'error' ? '回答未完成。' : '未生成更多内容。'}</p>
                             )}
                             {message.status !== 'complete' && (
-                                <span className={styles.messageStatus}>
+                                <Badge variant="secondary" className={styles.messageStatus}>
                                     {message.status === 'cancelled' ? '已停止 · 部分回复' : '生成失败 · 回答未完成'}
-                                </span>
+                                </Badge>
                             )}
                         </article>
                     ))}
                     <div ref={endRef} />
                 </div>
+                <CollaborationSourcePanel
+                    key={taskId}
+                    source={{ kind: 'task', id: taskId }}
+                    eventId={eventId}
+                    showDetails={false}
+                    onHistoryChange={() => {
+                        if (!running.current)
+                            void getTask(taskId)
+                                .then(saved => {
+                                    if (mounted.current && !running.current) setTask(saved)
+                                })
+                                .catch(() => undefined)
+                    }}
+                />
                 {actionError && (
-                    <div className={styles.error} role="alert">
+                    <FeedbackMessage variant="error" className={styles.error} role="alert">
                         <p>{actionError}</p>
-                        <button
+                        <Button
+                            variant="ghost"
                             type="button"
                             className={styles.textLink}
                             disabled={Boolean(activeTurn) || changingStatus}
@@ -1279,54 +1176,57 @@ function TaskDetail({ taskId }: { taskId: string }) {
                         >
                             重新载入任务
                             <RotateCcw size={13} aria-hidden="true" />
-                        </button>
-                    </div>
+                        </Button>
+                    </FeedbackMessage>
                 )}
                 {notice && (
-                    <p className={styles.notice} role="status">
-                        <Check size={14} aria-hidden="true" />
+                    <FeedbackMessage variant="info" className={styles.notice} role="status">
                         {notice}
-                    </p>
+                    </FeedbackMessage>
                 )}
                 {retry && !busy && !completed && (
                     <div className={styles.retryBar}>
                         <span>最近一次{retry.kind === 'start' ? '目标执行' : '补充请求'}未完成，可以沿用原请求重试。</span>
-                        <button
+                        <Button
+                            variant="outline"
                             type="button"
                             className={styles.secondaryButton}
-                            disabled={changingStatus || changingProject || !connection?.configured}
+                            disabled={changingStatus || !connection?.configured}
                             onClick={() => execute(retry)}
                         >
                             <RotateCcw size={14} aria-hidden="true" />
                             重试最近请求
-                        </button>
+                        </Button>
                     </div>
                 )}
                 {!connection?.configured && !completed && (
-                    <div className={styles.error} role="status">
-                        <p>DeepSeek 尚未配置。任务已保存，完成服务端配置后可继续。</p>
-                        <button type="button" className={styles.textLink} disabled={busy} onClick={reloadTask}>
+                    <FeedbackMessage variant="warning" className={styles.error} role="status">
+                        <p>尚无可用模型。任务已保存，请到账户设置添加可用连接。</p>
+                        <Button className={styles.textLink} variant="link" nativeButton={false} render={<Link href="/account#models" />}>
+                            配置我的模型
+                        </Button>
+                        <Button variant="ghost" type="button" className={styles.textLink} disabled={busy} onClick={reloadTask}>
                             重新检查连接
                             <RotateCcw size={13} aria-hidden="true" />
-                        </button>
-                    </div>
+                        </Button>
+                    </FeedbackMessage>
                 )}
                 {completed ? (
-                    <div className={styles.completedNotice}>
-                        <CircleCheck size={19} aria-hidden="true" />
+                    <FeedbackMessage variant="success" className={styles.completedNotice}>
                         <p>
                             任务已完成。
                             <br />
                             <span>恢复后可以在原上下文中继续。</span>
                         </p>
-                    </div>
+                    </FeedbackMessage>
                 ) : !task.task.started ? (
                     <div className={styles.startBlock}>
                         <p>
                             点击开始，将任务目标交给 {task.agent.name}。<span>创建和查看任务不会自动调用模型。</span>
                         </p>
                         {busy ? (
-                            <button
+                            <Button
+                                variant="outline"
                                 type="button"
                                 className={styles.secondaryButton}
                                 disabled={Boolean(activeTurn?.stopping || remoteStopping)}
@@ -1334,17 +1234,17 @@ function TaskDetail({ taskId }: { taskId: string }) {
                             >
                                 <Square size={14} aria-hidden="true" />
                                 {activeTurn?.stopping || remoteStopping ? '正在停止' : '停止执行'}
-                            </button>
+                            </Button>
                         ) : (
-                            <button
+                            <Button
                                 type="button"
                                 className={styles.primaryButton}
-                                disabled={changingStatus || changingProject || !connection?.configured}
+                                disabled={changingStatus || !connection?.configured}
                                 onClick={() => execute()}
                             >
                                 <Play size={15} aria-hidden="true" />
                                 开始执行
-                            </button>
+                            </Button>
                         )}
                     </div>
                 ) : (
@@ -1355,29 +1255,31 @@ function TaskDetail({ taskId }: { taskId: string }) {
                             void execute()
                         }}
                     >
-                        <label htmlFor="task-message">补充消息</label>
-                        <textarea
+                        <Label htmlFor="task-message">补充消息</Label>
+                        <MessageComposer
                             id="task-message"
-                            ref={composerRef}
+                            inputRef={composerRef}
                             value={draft}
-                            maxLength={32000}
-                            rows={3}
-                            placeholder={busy ? 'Agent 正在回复，也可以先整理下一条消息…' : '补充背景、回答问题，或继续追问…'}
-                            onChange={event => updateDraft(event.target.value)}
-                            onKeyDown={event => {
-                                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
-                                    event.preventDefault()
-                                    void execute()
-                                }
-                            }}
+                            onChange={updateDraft}
+                            mentions={draftMentions}
+                            onMentionsChange={setDraftMentions}
+                            onSend={() => void execute()}
+                            placeholder={
+                                busy
+                                    ? 'Agent 正在回复，也可以先整理下一条消息…'
+                                    : task.messages.some(message => message.kind === 'opening')
+                                      ? '补充背景，或让 Agent 帮你向上游询问缺少的信息…'
+                                      : '补充背景、回答问题，或继续追问…'
+                            }
                         />
                         <div className={styles.composerFooter}>
                             <span>
-                                {busy ? '正在生成回复，草稿会保留。' : 'Enter 发送 · Shift + Enter 换行'}
+                                {busy ? '正在生成回复，草稿会保留。' : ''}
                                 {draft.length > 30000 && ` · ${draft.length.toLocaleString()} / 32,000`}
                             </span>
                             {busy ? (
-                                <button
+                                <Button
+                                    variant="outline"
                                     type="button"
                                     className={styles.stopButton}
                                     disabled={Boolean(activeTurn?.stopping || remoteStopping)}
@@ -1385,21 +1287,66 @@ function TaskDetail({ taskId }: { taskId: string }) {
                                 >
                                     <Square size={14} aria-hidden="true" />
                                     {activeTurn?.stopping || remoteStopping ? '正在停止' : '停止生成'}
-                                </button>
+                                </Button>
                             ) : (
-                                <button
+                                <Button
+                                    size="icon"
                                     type="submit"
                                     className={styles.sendButton}
                                     aria-label="发送补充消息"
-                                    disabled={!draft.trim() || changingStatus || changingProject || !connection?.configured}
+                                    disabled={!draft.trim() || changingStatus || !connection?.configured}
                                 >
                                     <ArrowUp size={18} aria-hidden="true" />
-                                </button>
+                                </Button>
                             )}
                         </div>
                     </form>
                 )}
             </div>
+            <Collapsible
+                className="space-y-4 border-t pt-4"
+                defaultOpen={!task.messages.some(message => message.kind === 'opening') || Boolean(eventId)}
+            >
+                <CollapsibleTrigger render={<Button variant="ghost" className="w-full justify-start [&>svg:last-child]:ml-auto" />}>
+                    任务详情
+                    <ChevronDown size={15} aria-hidden="true" />
+                </CollapsibleTrigger>
+                <CollapsibleContent keepMounted className="space-y-4">
+                    <p id="task-status-hint" className={styles.statusHint}>
+                        {busy
+                            ? '正在生成回复，停止或等待结束后才能修改工作状态。'
+                            : completed
+                              ? '任务已完成，历史仍可查看。恢复任务后可继续执行。'
+                              : '工作状态由你决定；一次回复结束不会自动完成任务。'}
+                    </p>
+                    <Collapsible className={styles.goal} defaultOpen>
+                        <CollapsibleTrigger render={<Button variant="ghost" className="w-full justify-start [&>svg:last-child]:ml-auto" />}>
+                            <ClipboardList size={16} aria-hidden="true" />
+                            任务目标
+                            <ChevronDown size={15} aria-hidden="true" />
+                        </CollapsibleTrigger>
+                        <CollapsibleContent>
+                            <p>{task.task.goal}</p>
+                        </CollapsibleContent>
+                    </Collapsible>
+                    <Collapsible className={styles.agentSnapshot}>
+                        <CollapsibleTrigger render={<Button variant="ghost" className="w-full justify-start [&>svg:last-child]:ml-auto" />}>
+                            查看助手配置
+                            <ChevronDown size={14} aria-hidden="true" />
+                        </CollapsibleTrigger>
+                        <CollapsibleContent>
+                            <p>创建时的模型：{modelLabel(task.agent.modelId)}</p>
+                            <p>
+                                工具：
+                                {task.agent.toolIds.length
+                                    ? task.agent.toolIds.map(id => (id === 'calculator' ? '计算器' : '当前时间')).join('、')
+                                    : '未启用工具'}
+                            </p>
+                            <p className={styles.frozenPrompt}>{task.agent.systemPrompt || '通用助手默认提示词'}</p>
+                        </CollapsibleContent>
+                    </Collapsible>
+                </CollapsibleContent>
+            </Collapsible>
         </section>
     )
 }

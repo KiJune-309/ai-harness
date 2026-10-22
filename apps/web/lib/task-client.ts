@@ -1,4 +1,4 @@
-import type { ChatStreamEvent, CreateTask, PersonalTask, UpdateTaskStatus, UpdateTaskProject } from '@ai-harness/contracts'
+import type { ChatStreamEvent, CreateTask, PersonalTask, UpdateTaskStatus, UpdateTaskProject, PersonMention } from '@ai-harness/contracts'
 import {
     cancelChatMessageSchema,
     createTaskSchema,
@@ -136,7 +136,7 @@ export async function updateTaskProject(id: string, input: UpdateTaskProject): P
  */
 async function streamTask(
     path: string,
-    body: Record<string, string>,
+    body: Record<string, unknown>,
     onEvent: (event: TaskStreamEvent) => void,
     signal: AbortSignal
 ): Promise<void> {
@@ -178,6 +178,7 @@ export async function startTask(
  * @param requestId - Stable identifier reused for an explicit failed-turn retry.
  * @param onEvent - Receives incremental text and validated final task state.
  * @param signal - Cancellation signal for the execution connection.
+ * @param mentions - Explicit account bindings relative to the submitted message body.
  * @returns A promise settled after the terminal stream event.
  * @throws Error when validation, task rules, or streaming fails.
  */
@@ -186,9 +187,10 @@ export async function streamTaskMessage(
     content: string,
     requestId: string,
     onEvent: (event: TaskStreamEvent) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    mentions?: PersonMention[]
 ): Promise<void> {
-    const input = sendChatMessageSchema.parse({ content, requestId })
+    const input = sendChatMessageSchema.parse({ content, requestId, ...(mentions?.length ? { mentions } : {}) })
     await streamTask(`/tasks/${encodeURIComponent(id)}/messages`, input, onEvent, signal)
 }
 
