@@ -9,6 +9,18 @@
         ".": {
             "types": "./lib/index.d.ts",
             "default": "./lib/index.js"
+        },
+        "./embeddings": {
+            "types": "./lib/embeddings.d.ts",
+            "default": "./lib/embeddings.js"
+        },
+        "./knowledge": {
+            "types": "./lib/knowledge.d.ts",
+            "default": "./lib/knowledge.js"
+        },
+        "./collaboration": {
+            "types": "./lib/collaboration.d.ts",
+            "default": "./lib/collaboration.js"
         }
     },
     "scripts": {
@@ -16,13 +28,18 @@
     },
     "dependencies": {
         "@ai-harness/contracts": "workspace:*",
+        "@aws-sdk/client-s3": "3.1152.0",
         "@deepseek-ai/cordis": "4.0.5-alpha.2",
         "@deepseek-ai/dsh-agent": "workspace:*",
         "@deepseek-ai/dsh-agent-loop": "workspace:*",
         "@deepseek-ai/dsh-llm": "0.2.1-alpha.5",
+        "@deepseek-ai/dsh-sandbox": "0.2.1-alpha.5",
         "@deepseek-ai/dsh-session": "workspace:*",
         "@deepseek-ai/dsh-session-projection": "0.2.1-alpha.5",
         "@deepseek-ai/dsh-system-prompt": "workspace:*",
-        "@deepseek-ai/dsh-tools": "workspace:*"
+        "@deepseek-ai/dsh-tools": "workspace:*",
+        "mammoth": "1.13.0",
+        "pdfjs-dist": "6.4.299",
+        "@deepseek-ai/dsh-session-persistence": "0.2.1-alpha.5"
     }
 }
