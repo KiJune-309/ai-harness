@@ -8,10 +8,11 @@ import {
     type PersonalTask,
     type SendChatMessage,
 } from '@ai-harness/contracts'
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Put, Req, Res } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Put, Req, Res, UseGuards } from '@nestjs/common'
 import type { Response } from 'express'
 import type { ChatRequest } from './auth.js'
 import { ChatService } from './chat-service.js'
+import { LegacyProjectsRetiredGuard, throwLegacyProjectRetired } from './legacy-project-policy.js'
 
 /**
  * Validate stable task identifiers before they reach scoped persistence.
@@ -55,6 +56,7 @@ export class TaskController {
     create(@Req() request: ChatRequest, @Body() body: unknown): Promise<PersonalTask> {
         const parsed = createTaskSchema.safeParse(body)
         if (!parsed.success) throw new BadRequestException('请填写有效的任务名称、目标和请求标识。')
+        if (parsed.data.projectId) throwLegacyProjectRetired()
         return this.service.createTask(request.chatScope, parsed.data)
     }
 
@@ -82,6 +84,7 @@ export class TaskController {
      * @throws ConflictException during generation or concurrent task mutations.
      */
     @Put(':id/project')
+    @UseGuards(LegacyProjectsRetiredGuard)
     project(@Req() request: ChatRequest, @Param('id') id: string, @Body() body: unknown): Promise<PersonalTask> {
         const ownedId = taskId(id)
         const parsed = updateTaskProjectSchema.safeParse(body)

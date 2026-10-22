@@ -2,16 +2,18 @@ import { randomUUID } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { createChatRuntime, type ChatRuntime } from '@ai-harness/chat-runtime'
 import { agentDefinitionSchema, personalProjectSchema, personalTaskSchema, projectDetailSchema } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore, type ChatStore } from '@ai-harness/db'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiApp } from '../src/app.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
+import { sessionHeaders } from './session-fixture.js'
 
 const token = 'project-http-test-token-of-sufficient-length'
 const config = readApiConfig({ HARNESS_API_TOKEN: token, CHAT_STORE: 'memory' })
 const userId = randomUUID()
 const applications: NestExpressApplication[] = []
+let currentStore: ChatStore
 
 /**
  * Start actual Nest routes using real scoped temporary persistence.
@@ -20,8 +22,9 @@ const applications: NestExpressApplication[] = []
  * @throws Error if application initialization or port binding fails.
  */
 async function start(runtime?: ChatRuntime): Promise<string> {
-    const store = await createChatStore({ allowMemory: true })
-    const app = await createApiApp(config, { store, runtime, logger: false })
+    const store = await createMemoryChatStore()
+    currentStore = store
+    const app = await createApiApp({ ...config, apiKey: runtime ? 'private-runtime-fixture-key' : '' }, { store, runtime, logger: false })
     applications.push(app)
     await app.listen(0, '127.0.0.1')
     const address = app.getHttpServer().address() as AddressInfo
@@ -29,17 +32,12 @@ async function start(runtime?: ChatRuntime): Promise<string> {
 }
 
 /**
- * Construct trusted Web-to-API claims for a browser identity.
+ * Persist a real fixture account session and construct private HTTP headers.
  * @param identity - Authenticated user identifier.
  * @returns Headers accepted by the shared API guard.
  */
-function headers(identity = userId): Record<string, string> {
-    return {
-        authorization: `Bearer ${token}`,
-        'x-harness-user-id': identity,
-        'x-harness-workspace-id': config.workspaceId,
-        'content-type': 'application/json',
-    }
+async function headers(identity = userId): Promise<Record<string, string>> {
+    return sessionHeaders(currentStore, config, identity)
 }
 
 /**
@@ -48,11 +46,11 @@ function headers(identity = userId): Record<string, string> {
  * @param path - Relative project, task or Agent route.
  * @param body - Public JSON input.
  * @param method - Mutation HTTP method.
- * @param identity - Browser identity passed through trusted claims.
+ * @param identity - Identity of a persisted fixture account and real session.
  * @returns The unconsumed HTTP response.
  */
-function mutate(base: string, path: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
-    return fetch(`${base}/${path}`, { method, headers: headers(identity), body: JSON.stringify(body) })
+async function mutate(base: string, path: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
+    return fetch(`${base}/${path}`, { method, headers: await headers(identity), body: JSON.stringify(body) })
 }
 
 /**
@@ -102,7 +100,7 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
     it('validates project routes, safely replays after edits and creates project tasks without credentials', async () => {
         const base = await start()
         expect((await fetch(`${base}/projects`)).status).toBe(401)
-        expect(await (await fetch(`${base}/projects`, { headers: headers() })).json()).toEqual({ projects: [] })
+        expect(await (await fetch(`${base}/projects`, { headers: await headers() })).json()).toEqual({ projects: [] })
         for (const invalid of [{ name: ' ' }, { name: 'a'.repeat(121) }, { description: 'a'.repeat(2001) }, { userId }])
             expect((await mutate(base, 'projects', { requestId: randomUUID(), name: 'valid', description: '', ...invalid })).status).toBe(
                 400
@@ -114,12 +112,12 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
         )
         expect(personalProjectSchema.parse(await (await mutate(base, 'projects', input)).json())).toEqual(edited)
         expect((await mutate(base, 'projects', { ...input, name: 'different' })).status).toBe(409)
-        expect((await fetch(`${base}/projects/not-uuid`, { headers: headers() })).status).toBe(400)
+        expect((await fetch(`${base}/projects/not-uuid`, { headers: await headers() })).status).toBe(400)
         expect((await mutate(base, `projects/${created.id}`, { name: ' ', description: '' }, 'PUT')).status).toBe(400)
         const task = await createTask(base, { projectId: created.id })
         expect(task.task).toMatchObject({ projectId: created.id, creationProjectId: created.id, started: false })
         expect((await mutate(base, `tasks/${task.id}/start`, { requestId: randomUUID() })).status).toBe(503)
-        const detail = projectDetailSchema.parse(await (await fetch(`${base}/projects/${created.id}`, { headers: headers() })).json())
+        const detail = projectDetailSchema.parse(await (await fetch(`${base}/projects/${created.id}`, { headers: await headers() })).json())
         expect(detail).toEqual({ project: edited, tasks: [task] })
         expect(JSON.stringify(detail)).not.toContain('"creation":')
         expect((await mutate(base, `tasks/${task.id}/project`, { projectId: 'bad' }, 'PUT')).status).toBe(400)
@@ -143,10 +141,12 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
         const foreignTask = personalTaskSchema.parse(
             await (await mutate(base, 'tasks', { requestId: randomUUID(), title: 'foreign', goal: 'foreign' }, 'POST', foreignUser)).json()
         )
-        expect(await (await fetch(`${base}/projects`, { headers: headers(foreignUser) })).json()).toEqual({ projects: [foreignProject] })
+        expect(await (await fetch(`${base}/projects`, { headers: await headers(foreignUser) })).json()).toEqual({
+            projects: [foreignProject],
+        })
         for (const id of [privateProject.id, randomUUID()]) {
             const responses = [
-                await fetch(`${base}/projects/${id}`, { headers: headers(foreignUser) }),
+                await fetch(`${base}/projects/${id}`, { headers: await headers(foreignUser) }),
                 await mutate(base, `projects/${id}`, { name: 'overwrite', description: '' }, 'PUT', foreignUser),
                 await mutate(base, `tasks/${foreignTask.id}/project`, { projectId: id }, 'PUT', foreignUser),
                 await mutate(
@@ -166,13 +166,14 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
         expect(crossTask.status).toBe(404)
         expect(await crossTask.json()).toMatchObject({ message: '未找到这个任务。' })
         const wrongWorkspace = await fetch(`${base}/projects/${privateProject.id}`, {
-            headers: { ...headers(), 'x-harness-workspace-id': 'other' },
+            headers: { ...(await headers()), 'x-harness-workspace-id': 'other', 'x-harness-user-id': randomUUID() },
         })
-        expect(wrongWorkspace.status).toBe(401)
-        expect(await (await fetch(`${base}/tasks`, { headers: headers(foreignUser) })).json()).toEqual({ tasks: [foreignTask] })
-        expect(personalTaskSchema.parse(await (await fetch(`${base}/tasks/${privateTask.id}`, { headers: headers() })).json())).toEqual(
-            privateTask
-        )
+        expect(wrongWorkspace.status).toBe(200)
+        expect(projectDetailSchema.parse(await wrongWorkspace.json())).toEqual({ project: privateProject, tasks: [privateTask] })
+        expect(await (await fetch(`${base}/tasks`, { headers: await headers(foreignUser) })).json()).toEqual({ tasks: [foreignTask] })
+        expect(
+            personalTaskSchema.parse(await (await fetch(`${base}/tasks/${privateTask.id}`, { headers: await headers() })).json())
+        ).toEqual(privateTask)
         expect(runtime.run).not.toHaveBeenCalled()
     })
 
@@ -206,7 +207,7 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
         const initialResponse = await mutate(base, `tasks/${task.id}/start`, { requestId: initialRequest })
         expect(initialResponse.status).toBe(201)
         await initialResponse.text()
-        const started = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${task.id}`, { headers: headers() })).json())
+        const started = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${task.id}`, { headers: await headers() })).json())
         expect(started.activeRequestId).toBeUndefined()
         expect(started.messages.at(-1)?.content).toBe('TASK_A_ANSWER')
         const moved = personalTaskSchema.parse(
@@ -234,7 +235,9 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
         expect(JSON.stringify(calls)).not.toContain('PROJECT_B_DESCRIPTION_SENTINEL')
         expect(JSON.stringify(calls)).not.toContain('OTHER_TASK_GOAL_SENTINEL')
         expect(calls[1].tools).toHaveLength(1)
-        const firstDetail = projectDetailSchema.parse(await (await fetch(`${base}/projects/${first.id}`, { headers: headers() })).json())
+        const firstDetail = projectDetailSchema.parse(
+            await (await fetch(`${base}/projects/${first.id}`, { headers: await headers() })).json()
+        )
         expect(firstDetail.tasks.map(value => value.id)).toEqual([other.id])
         await mutate(base, `tasks/${task.id}/status`, { status: 'completed' }, 'PUT')
         await mutate(base, `tasks/${task.id}/project`, { projectId: first.id }, 'PUT')
@@ -267,7 +270,7 @@ describe('personal project HTTP boundary and Cordis context isolation', () => {
         expect(refusal.status).toBe(409)
         release.resolve()
         await (await running).text()
-        const saved = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${task.id}`, { headers: headers() })).json())
+        const saved = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${task.id}`, { headers: await headers() })).json())
         expect(saved.task.projectId).toBe(first.id)
         expect(saved.messages.at(-1)?.content).toBe('finished')
     })

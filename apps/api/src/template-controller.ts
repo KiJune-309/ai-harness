@@ -5,9 +5,10 @@ import {
     type ProjectTemplate,
     type TemplateLaunchResult,
 } from '@ai-harness/contracts'
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Put, Req } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Put, Req, UseGuards } from '@nestjs/common'
 import type { ChatRequest } from './auth.js'
 import { ChatService } from './chat-service.js'
+import { LegacyProjectsRetiredGuard } from './legacy-project-policy.js'
 
 /**
  * Validate template route identifiers before scoped persistence.
@@ -95,6 +96,7 @@ export class TemplateController {
      * @throws HttpException for ownership, storage availability or version conflicts.
      */
     @Post(':id/launch')
+    @UseGuards(LegacyProjectsRetiredGuard)
     launch(@Req() request: ChatRequest, @Param('id') id: string, @Body() body: unknown): Promise<TemplateLaunchResult> {
         const ownedId = templateId(id)
         const parsed = launchTemplateSchema.safeParse(body)

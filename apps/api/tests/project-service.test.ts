@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { ChatRuntime } from '@ai-harness/chat-runtime'
 import type { CreateProject, CreateTask, PersonalTask } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore } from '@ai-harness/db'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatService } from '../src/chat-service.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
 
 const scope = { userId: randomUUID(), workspaceId: 'personal' }
 const config = readApiConfig({ HARNESS_API_TOKEN: 'project-service-test-token-of-sufficient-length', CHAT_STORE: 'memory' })
@@ -16,7 +16,7 @@ const services: ChatService[] = []
  * @returns The shared task coordinator and its dependencies.
  */
 async function fixture(run: ChatRuntime['run'] | null = async () => ({ content: 'answer', reasoning: '', status: 'complete' })) {
-    const store = await createChatStore({ allowMemory: true })
+    const store = await createMemoryChatStore()
     const runtime = run ? { run: vi.fn(run), dispose: vi.fn(async () => undefined) } : undefined
     const service = new ChatService(store, runtime, config)
     services.push(service)

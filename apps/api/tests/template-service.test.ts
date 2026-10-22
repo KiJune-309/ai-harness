@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import type { ChatRuntime } from '@ai-harness/chat-runtime'
 import type { CreateTemplate, LaunchTemplate, TemplateInput } from '@ai-harness/contracts'
-import { createChatStore, TemplateConflictError } from '@ai-harness/db'
+import { createMemoryChatStore, TemplateConflictError } from '@ai-harness/db'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentService } from '../src/agent-service.js'
 import { createAgentCatalog } from '../src/agent-catalog.js'
 import { ChatService } from '../src/chat-service.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
 
 const scope = { userId: randomUUID(), workspaceId: 'personal' }
 const config = readApiConfig({ HARNESS_API_TOKEN: 'template-service-test-token-of-sufficient-length', CHAT_STORE: 'memory' })
@@ -18,7 +18,7 @@ const services: ChatService[] = []
  * @returns The shared service, real Agent validation and persistence.
  */
 async function fixture(configured = true) {
-    const store = await createChatStore({ allowMemory: true })
+    const store = await createMemoryChatStore()
     const runtime = configured
         ? {
               run: vi.fn<ChatRuntime['run']>(async () => ({ content: 'MODEL_ANSWER', reasoning: '', status: 'complete' })),

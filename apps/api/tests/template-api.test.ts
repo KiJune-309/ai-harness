@@ -9,17 +9,19 @@ import {
     projectTemplateSchema,
     templateLaunchResultSchema,
 } from '@ai-harness/contracts'
-import { createChatStore } from '@ai-harness/db'
+import { createMemoryChatStore, type ChatStore } from '@ai-harness/db'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApiApp } from '../src/app.js'
-import { readApiConfig } from '../src/config.js'
+import { readTestApiConfig as readApiConfig } from './config-fixture.js'
+import { sessionHeaders } from './session-fixture.js'
 
 const token = 'template-http-test-token-of-sufficient-length'
 const providerKey = 'template-provider-fixture-private-key'
 const config = readApiConfig({ HARNESS_API_TOKEN: token, CHAT_STORE: 'memory' })
 const userId = randomUUID()
 const applications: NestExpressApplication[] = []
+let currentStore: ChatStore
 
 /**
  * Start actual guarded Nest routes with real scoped temporary persistence.
@@ -28,7 +30,9 @@ const applications: NestExpressApplication[] = []
  * @throws Error if application initialization or port binding fails.
  */
 async function start(runtime?: ChatRuntime): Promise<string> {
-    const app = await createApiApp(config, { store: await createChatStore({ allowMemory: true }), runtime, logger: false })
+    const store = await createMemoryChatStore()
+    currentStore = store
+    const app = await createApiApp({ ...config, apiKey: runtime ? 'private-runtime-fixture-key' : '' }, { store, runtime, logger: false })
     applications.push(app)
     await app.listen(0, '127.0.0.1')
     const address = app.getHttpServer().address() as AddressInfo
@@ -36,17 +40,12 @@ async function start(runtime?: ChatRuntime): Promise<string> {
 }
 
 /**
- * Construct trusted server-to-server authentication and ownership claims.
+ * Persist a real fixture account session and construct private HTTP headers.
  * @param identity - Browser identity established by the Web server.
  * @returns Headers accepted by the application guard.
  */
-function headers(identity = userId): Record<string, string> {
-    return {
-        authorization: `Bearer ${token}`,
-        'x-harness-user-id': identity,
-        'x-harness-workspace-id': config.workspaceId,
-        'content-type': 'application/json',
-    }
+async function headers(identity = userId): Promise<Record<string, string>> {
+    return sessionHeaders(currentStore, config, identity)
 }
 
 /**
@@ -58,8 +57,8 @@ function headers(identity = userId): Record<string, string> {
  * @param identity - Browser ownership identity.
  * @returns The unconsumed HTTP response.
  */
-function mutate(base: string, path: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
-    return fetch(`${base}/${path}`, { method, headers: headers(identity), body: JSON.stringify(body) })
+async function mutate(base: string, path: string, body: unknown, method = 'POST', identity = userId): Promise<Response> {
+    return fetch(`${base}/${path}`, { method, headers: await headers(identity), body: JSON.stringify(body) })
 }
 
 /**
@@ -107,7 +106,7 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
     it('validates the public boundary, keeps edited creation replay and generates without model configuration', async () => {
         const base = await start()
         expect((await fetch(`${base}/templates`)).status).toBe(401)
-        expect(await (await fetch(`${base}/templates`, { headers: headers() })).json()).toEqual({ templates: [] })
+        expect(await (await fetch(`${base}/templates`, { headers: await headers() })).json()).toEqual({ templates: [] })
         for (const invalid of [
             { name: ' ' },
             { tasks: [] },
@@ -120,7 +119,7 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
         const response = await mutate(base, 'templates', input)
         expect(response.status).toBe(201)
         const template = projectTemplateSchema.parse(await response.json())
-        expect((await fetch(`${base}/templates/not-uuid`, { headers: headers() })).status).toBe(400)
+        expect((await fetch(`${base}/templates/not-uuid`, { headers: await headers() })).status).toBe(400)
         expect((await mutate(base, `templates/${template.id}`, { ...input, version: 1 }, 'PUT')).status).toBe(400)
         const edit = { name: '修改名称', description: '修改说明', tasks: [...template.tasks].reverse(), version: 1 }
         const updated = projectTemplateSchema.parse(await (await mutate(base, `templates/${template.id}`, edit, 'PUT')).json())
@@ -134,7 +133,7 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
             await (await mutate(base, `templates/${template.id}/launch`, launch({ version: 2 }))).json()
         )
         const detail = projectDetailSchema.parse(
-            await (await fetch(`${base}/projects/${result.project.id}`, { headers: headers() })).json()
+            await (await fetch(`${base}/projects/${result.project.id}`, { headers: await headers() })).json()
         )
         expect(detail.tasks.map(task => task.title)).toEqual(updated.tasks.map(item => item.title))
         expect(detail.tasks.map(task => task.task.status)).toEqual(['not-started', 'not-started'])
@@ -173,10 +172,10 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
         const input = launch()
         await mutate(base, `templates/${template.id}/launch`, input)
         const foreign = randomUUID()
-        expect(await (await fetch(`${base}/templates`, { headers: headers(foreign) })).json()).toEqual({ templates: [] })
+        expect(await (await fetch(`${base}/templates`, { headers: await headers(foreign) })).json()).toEqual({ templates: [] })
         for (const id of [template.id, randomUUID()]) {
             const responses = [
-                await fetch(`${base}/templates/${id}`, { headers: headers(foreign) }),
+                await fetch(`${base}/templates/${id}`, { headers: await headers(foreign) }),
                 await mutate(
                     base,
                     `templates/${id}`,
@@ -202,12 +201,13 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
             expect(response.status).toBe(404)
             expect(await response.json()).toMatchObject({ message: '未找到这个 Agent。' })
         }
-        expect(await (await fetch(`${base}/projects`, { headers: headers(foreign) })).json()).toEqual({ projects: [] })
-        expect(await (await fetch(`${base}/tasks`, { headers: headers(foreign) })).json()).toEqual({ tasks: [] })
+        expect(await (await fetch(`${base}/projects`, { headers: await headers(foreign) })).json()).toEqual({ projects: [] })
+        expect(await (await fetch(`${base}/tasks`, { headers: await headers(foreign) })).json()).toEqual({ tasks: [] })
         const wrongWorkspace = await fetch(`${base}/templates/${template.id}`, {
-            headers: { ...headers(), 'x-harness-workspace-id': 'another' },
+            headers: { ...(await headers()), 'x-harness-workspace-id': 'another', 'x-harness-user-id': randomUUID() },
         })
-        expect(wrongWorkspace.status).toBe(401)
+        expect(wrongWorkspace.status).toBe(200)
+        expect(projectTemplateSchema.parse(await wrongWorkspace.json())).toEqual(template)
     })
 
     it('rejects ordinary project action collisions and replays original instance after rename and task removal', async () => {
@@ -232,7 +232,9 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
         const replay = templateLaunchResultSchema.parse(await (await mutate(base, `templates/${template.id}/launch`, input)).json())
         expect(replay).toEqual({ project: edited, taskIds: result.taskIds })
         expect((await mutate(base, `templates/${template.id}/launch`, { ...input, name: 'changed' })).status).toBe(409)
-        const removed = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${result.taskIds[0]}`, { headers: headers() })).json())
+        const removed = personalTaskSchema.parse(
+            await (await fetch(`${base}/tasks/${result.taskIds[0]}`, { headers: await headers() })).json()
+        )
         expect(removed.task.projectId).toBeUndefined()
         expect(runtime.run).not.toHaveBeenCalled()
     })
@@ -308,10 +310,12 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
             'ANOTHER_INSTANCE_SENTINEL',
         ])
             expect(JSON.stringify(calls)).not.toContain(sentinel)
-        const otherTask = personalTaskSchema.parse(await (await fetch(`${base}/tasks/${first.taskIds[1]}`, { headers: headers() })).json())
+        const otherTask = personalTaskSchema.parse(
+            await (await fetch(`${base}/tasks/${first.taskIds[1]}`, { headers: await headers() })).json()
+        )
         expect(otherTask.messages).toEqual([])
         const otherInstance = personalTaskSchema.parse(
-            await (await fetch(`${base}/tasks/${second.taskIds[0]}`, { headers: headers() })).json()
+            await (await fetch(`${base}/tasks/${second.taskIds[0]}`, { headers: await headers() })).json()
         )
         expect(otherInstance.messages.map(message => message.content)).toEqual(['OPENING_ONE', 'OPENING_TWO'])
         await mutate(base, `tasks/${taskId}/status`, { status: 'completed' }, 'PUT')
@@ -324,7 +328,7 @@ describe('personal template HTTP lifecycle and actual Cordis isolation', () => {
         expect(providerFetch).toHaveBeenCalledTimes(3)
         const replay = templateLaunchResultSchema.parse(await (await mutate(base, `templates/${template.id}/launch`, input)).json())
         expect(replay.taskIds).toEqual(first.taskIds)
-        expect((await (await fetch(`${base}/tasks/${taskId}`, { headers: headers() })).json()).task.projectId).toBe(second.project.id)
+        expect((await (await fetch(`${base}/tasks/${taskId}`, { headers: await headers() })).json()).task.projectId).toBe(second.project.id)
         expect(providerFetch).toHaveBeenCalledTimes(3)
         expect(JSON.stringify({ template, first, second, otherTask, otherInstance })).not.toContain(providerKey)
     })

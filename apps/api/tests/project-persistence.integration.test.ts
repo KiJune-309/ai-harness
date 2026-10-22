@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentDefinition, PersonalProject, PersonalTask, ProjectDetail } from '@ai-harness/contracts'
 import { expect, it } from 'vitest'
+import { registerSession } from './session-fixture.js'
 
 const token = 'sf003-local-persistence-test-server-token-20261017'
 
@@ -46,7 +47,7 @@ async function stop(child: ChildProcess | undefined): Promise<void> {
  * Boots the built API in a distinct operating-system process.
  * @param port - Dedicated local HTTP port.
  * @param modelUrl - Deterministic native-provider fixture URL.
- * @param memory - Whether to use disposable process-local storage instead of real PostgreSQL.
+ * @param memory - Supply the removed memory setting to verify that startup is rejected.
  * @returns A ready child process without exposing credentials in logs.
  * @throws Error when startup fails or readiness times out.
  */
@@ -55,6 +56,8 @@ async function boot(port: number, modelUrl: string, memory = false): Promise<Chi
         env: {
             ...process.env,
             HARNESS_API_TOKEN: token,
+            ACCOUNT_ENCRYPTION_KEY: 'a'.repeat(64),
+            OPENAI_ALLOWED_LOCAL_ORIGINS: modelUrl,
             HARNESS_WORKSPACE_ID: 'sf003-test',
             DATABASE_URL: memory ? '' : process.env.TEST_DATABASE_URL,
             CHAT_STORE: memory ? 'memory' : '',
@@ -68,14 +71,10 @@ async function boot(port: number, modelUrl: string, memory = false): Promise<Chi
     })
     for (let attempt = 0; attempt < 100; attempt += 1) {
         if (child.exitCode !== null) throw new Error('Isolated project API exited during startup.')
-        const response = await fetch(`http://127.0.0.1:${port}/api/chat/status`, {
-            headers: {
-                authorization: `Bearer ${token}`,
-                'x-harness-user-id': '36ee7dd6-1d63-419a-8be4-3045d72bd92a',
-                'x-harness-workspace-id': 'sf003-test',
-            },
+        const response = await fetch(`http://127.0.0.1:${port}/api/account/me`, {
+            headers: { authorization: `Bearer ${token}` },
         }).catch(() => undefined)
-        if (response?.ok) {
+        if (response?.status === 401) {
             await response.body?.cancel()
             return child
         }
@@ -102,6 +101,7 @@ it.skipIf(!process.env.TEST_DATABASE_URL)(
         const modelUrl = `http://127.0.0.1:${address.port}`
         const port = await availablePort()
         const user = randomUUID()
+        const sessions = new Map<string, string>()
         let child: ChildProcess | undefined
         /**
          * Calls the authenticated isolated API using only test-owned identity and resources.
@@ -110,13 +110,17 @@ it.skipIf(!process.env.TEST_DATABASE_URL)(
          * @param body - Optional JSON request payload.
          * @returns The unconsumed HTTP response.
          */
-        function call(path: string, method = 'GET', body?: unknown): Promise<Response> {
+        async function call(path: string, method = 'GET', body?: unknown): Promise<Response> {
+            let session = sessions.get(user)
+            if (!session) {
+                session = await registerSession(`http://127.0.0.1:${port}`, token, user)
+                sessions.set(user, session)
+            }
             return fetch(`http://127.0.0.1:${port}/api/chat${path}`, {
                 method,
                 headers: {
                     authorization: `Bearer ${token}`,
-                    'x-harness-user-id': user,
-                    'x-harness-workspace-id': 'sf003-test',
+                    'x-harness-session': session,
                     'content-type': 'application/json',
                 },
                 ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -195,24 +199,7 @@ it.skipIf(!process.env.TEST_DATABASE_URL)(
             expect(await json('/tasks', 'POST', input)).toEqual(removed)
             expect((await json<ProjectDetail>(`/projects/${destination.id}`)).tasks).toEqual([])
             await stop(child)
-            child = await boot(port, modelUrl, true)
-            const temporary = await json<PersonalProject>('/projects', 'POST', {
-                requestId: randomUUID(),
-                name: 'Temporary project',
-                description: '',
-            })
-            const temporaryTask = await json<PersonalTask>('/tasks', 'POST', {
-                requestId: randomUUID(),
-                title: 'Temporary membership',
-                goal: 'Only this process.',
-                projectId: temporary.id,
-            })
-            expect((await json<ProjectDetail>(`/projects/${temporary.id}`)).tasks.map(item => item.id)).toEqual([temporaryTask.id])
-            await stop(child)
-            child = await boot(port, modelUrl, true)
-            expect((await call(`/projects/${temporary.id}`)).status).toBe(404)
-            expect((await call(`/tasks/${temporaryTask.id}`)).status).toBe(404)
-            expect(await json('/projects')).toEqual({ projects: [] })
+            await expect(boot(port, modelUrl, true)).rejects.toThrow('exited during startup')
         } finally {
             await stop(child)
             await new Promise<void>((resolve, reject) => provider.close(error => (error ? reject(error) : resolve())))

@@ -1,7 +1,8 @@
 import { createProjectSchema, projectInputSchema, type PersonalProject, type ProjectDetail } from '@ai-harness/contracts'
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Put, Req } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Put, Req, UseGuards } from '@nestjs/common'
 import type { ChatRequest } from './auth.js'
 import { ChatService } from './chat-service.js'
+import { LegacyProjectsRetiredGuard } from './legacy-project-policy.js'
 
 /**
  * Validate stable project route identifiers before scoped persistence.
@@ -17,6 +18,7 @@ function projectId(id: string): string {
 
 /** Authenticated personal-project management using the shared task coordinator. */
 @Controller('chat/projects')
+@UseGuards(LegacyProjectsRetiredGuard)
 export class ProjectController {
     /**
      * Retain the process-owned project and task coordinator.
