@@ -1,0 +1,436 @@
+.gallery {
+    container-type: inline-size;
+    width: 100%;
+    max-width: 1200px;
+    margin-inline: auto;
+    padding: 28px 24px 36px;
+    font-size: var(--type-ui);
+}
+.header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px 24px;
+    padding-bottom: 28px;
+}
+.header h1 {
+    font-size: var(--type-title);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+}
+.tabs {
+    gap: 0;
+}
+.systemName {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--type-ui);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--muted-foreground);
+}
+.systemMark {
+    width: 14px;
+    height: 14px;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+    box-shadow: inset 3px 0 0 currentColor;
+    transform: rotate(-30deg);
+}
+.navigation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+.tabList {
+    gap: 28px;
+    max-width: none;
+    flex-shrink: 0;
+    padding: 0;
+    height: 44px;
+}
+.tabList [data-slot='tabs-trigger'] {
+    height: 44px;
+    padding: 0 0 12px;
+    border-radius: 0;
+    flex: none;
+}
+.tabList [data-slot='tabs-trigger']::after {
+    bottom: -1px;
+    height: 2px;
+    background: var(--foreground);
+    border-radius: 0;
+    inset-inline: 0;
+}
+.panel {
+    min-width: 0;
+    display: grid;
+    gap: 0;
+}
+.panel[hidden] {
+    display: none;
+}
+.section {
+    display: grid;
+    min-width: 0;
+    gap: 20px;
+    padding-block: 32px;
+    border-bottom: 1px solid var(--border);
+}
+.section:last-child {
+    border-bottom: 0;
+}
+.sectionHeading {
+    min-width: 0;
+}
+.sectionHeading h2 {
+    font-size: var(--type-subheading);
+    line-height: 1.5;
+    font-weight: 600;
+}
+.sectionHeading p {
+    margin-top: 8px;
+    max-width: 46ch;
+    color: var(--muted-foreground);
+    font-size: var(--type-ui);
+    line-height: 1.65;
+}
+.preview {
+    min-width: 0;
+}
+.exampleGroup {
+    display: grid;
+    gap: 16px;
+}
+.caption {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted-foreground);
+}
+.buttonRow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+.buttonDisclosure {
+    margin-top: 12px;
+}
+.form {
+    display: grid;
+    gap: 20px;
+    width: 100%;
+    max-width: 680px;
+}
+.formGrid {
+    display: grid;
+    gap: 20px;
+}
+.field {
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    min-width: 0;
+}
+.field label {
+    font-weight: 500;
+}
+.required {
+    margin-left: 6px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+    font-weight: 400;
+}
+.hint {
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.7;
+    color: var(--muted-foreground);
+}
+.fieldError {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--error-foreground);
+    font-size: 12px;
+}
+.fieldError svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+.formFooter,
+.previewFooter {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+}
+.formFooter {
+    margin-top: 2px;
+}
+.preferenceRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding-block: 12px;
+    min-height: 68px;
+}
+.preferenceRow + .preferenceRow {
+    border-top: 1px solid var(--border);
+}
+.preferenceRow:first-child {
+    padding-top: 0;
+}
+.preferenceRow + .preferenceRow {
+    margin-top: 8px;
+}
+.preferenceLabel {
+    display: grid;
+    gap: 6px;
+    line-height: 1.5;
+    cursor: pointer;
+}
+.frequency {
+    margin-top: 24px;
+}
+.frequency legend {
+    margin-bottom: 12px;
+    font-size: 13px;
+    font-weight: 500;
+}
+.option {
+    min-height: 32px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    cursor: pointer;
+}
+.disclosure {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+.feedbackStack {
+    display: grid;
+    gap: 16px;
+}
+.galleryFooter {
+    margin-top: 12px;
+    padding-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    border-top: 1px solid var(--border);
+    color: var(--muted-foreground);
+    font-size: var(--type-caption);
+}
+.collectionStack {
+    display: grid;
+    gap: 0;
+}
+.searchField {
+    max-width: 320px;
+}
+.tableToolbar {
+    display: flex;
+    gap: 16px;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+.tableToolbar .searchField {
+    flex: 1;
+}
+.tableFoot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 24px;
+}
+.tableFoot nav {
+    width: auto;
+    margin: 0;
+}
+.rowName {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-weight: 500;
+}
+.rowName > svg {
+    width: 16px;
+    height: 16px;
+    color: var(--muted-foreground);
+    flex-shrink: 0;
+}
+.rowMeta {
+    margin-top: 4px;
+    padding-left: 26px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+}
+.emptyIcon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    margin-bottom: 4px;
+    color: var(--muted-foreground);
+}
+.emptyIcon svg {
+    width: 22px;
+    height: 22px;
+}
+.utilityGrid {
+    display: grid;
+    gap: 32px;
+}
+.upload {
+    position: relative;
+    display: grid;
+    place-items: center;
+    gap: 8px;
+    padding: 28px 16px;
+    border: 1px dashed var(--input);
+    border-radius: 6px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 150ms ease;
+}
+.upload:hover {
+    border-color: var(--muted-foreground);
+}
+.upload > svg {
+    width: 20px;
+    height: 20px;
+    color: var(--muted-foreground);
+}
+.upload:focus-within {
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
+}
+.upload input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+}
+.fileName {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+.skeletonCard {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding-block: 12px;
+}
+.skeletonLines {
+    flex: 1;
+    display: grid;
+    gap: 10px;
+}
+@container (min-width: 640px) {
+    .utilityGrid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+@container (min-width: 720px) {
+    .section {
+        grid-template-columns: 176px minmax(0, 1fr);
+        gap: 40px;
+        padding-block: 32px;
+    }
+    .sectionHeading {
+        padding-top: 4px;
+    }
+    .sectionHeading p {
+        max-width: 22ch;
+        margin-top: 8px;
+    }
+}
+@media (max-width: 767px) {
+    .gallery {
+        padding: 20px 16px 28px;
+    }
+    .header h1 {
+        font-size: 22px;
+    }
+    .header {
+        gap: 12px;
+        padding-bottom: 24px;
+    }
+    .tabList {
+        gap: 20px;
+        width: max-content;
+        min-width: 100%;
+        justify-content: flex-start;
+    }
+    .tabList [data-slot='tabs-trigger'] {
+        font-size: 13px;
+    }
+    .section {
+        padding-block: 24px;
+        gap: 20px;
+    }
+    .formFooter,
+    .previewFooter {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+    .formFooter > button {
+        width: 100%;
+    }
+    .tableToolbar,
+    .tableFoot {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+    .galleryFooter {
+        margin-top: 32px;
+        flex-direction: column;
+    }
+    .systemName {
+        display: none;
+    }
+}
+.motionExample {
+    display: grid;
+    gap: 16px;
+}
+.motionContent {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding-block: 12px;
+}
+.motionContent > svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+.motionContent .hint {
+    margin-top: 4px;
+}
+.motionDisclosure {
+    max-width: 100%;
+}
+@media (pointer: coarse) {
+    .tabList,
+    .tabList [data-slot='tabs-trigger'] {
+        height: 44px;
+    }
+}

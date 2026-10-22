@@ -1,0 +1,362 @@
+.foundations {
+    min-width: 0;
+    font-family: var(--font-sans);
+}
+
+.fontHeading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+}
+
+.fontName {
+    font-size: 18px;
+    line-height: 28px;
+    font-weight: 500;
+    letter-spacing: -0.025em;
+}
+
+.fontHeading .annotation {
+    margin-top: 4px;
+}
+
+.fontSpecimen {
+    flex-shrink: 0;
+    color: var(--orbit-neutral-500);
+    font-size: 32px;
+    line-height: 44px;
+    font-weight: 400;
+    letter-spacing: -0.04em;
+}
+
+.annotation {
+    color: var(--muted-foreground);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+}
+
+.typeScale {
+    display: grid;
+    padding-block: 6px;
+}
+
+.typeRow {
+    display: grid;
+    grid-template-columns: 96px minmax(0, 1fr);
+    align-items: baseline;
+    gap: 24px;
+    padding-block: 12px;
+}
+
+.typeMeta {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    color: var(--muted-foreground);
+    font-size: 12px;
+    line-height: 20px;
+    white-space: nowrap;
+}
+
+.typeSize {
+    width: 20px;
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.typeSample {
+    min-width: 0;
+    color: var(--foreground);
+    letter-spacing: -0.025em;
+    overflow-wrap: anywhere;
+}
+
+.typeRow:nth-child(n + 4) .typeSample {
+    letter-spacing: 0;
+}
+
+.typeRow:nth-child(-n + 3) .typeSample {
+    text-wrap: balance;
+}
+
+.typeRow:last-child .typeSample {
+    color: var(--muted-foreground);
+}
+
+.monoRow {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+}
+
+.monoHeading {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+}
+
+.smallLabel {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 20px;
+}
+
+.monoSample {
+    padding-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 18px;
+    line-height: 28px;
+    letter-spacing: -0.025em;
+    overflow-wrap: anywhere;
+}
+
+.neutralGrid,
+.semanticGrid,
+.spacingGrid,
+.radiusGrid {
+    display: grid;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.neutralGrid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 24px 12px;
+}
+
+.colorItem {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+}
+
+.neutralSwatch,
+.semanticSwatch {
+    width: 100%;
+    border: 1px solid rgb(0 0 0 / 6%);
+    border-radius: 6px;
+}
+
+.neutralSwatch {
+    height: 56px;
+    margin-bottom: 9px;
+}
+
+.colorStep {
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 19px;
+    font-variant-numeric: tabular-nums;
+}
+
+.colorHex {
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 18px;
+    letter-spacing: -0.025em;
+    white-space: nowrap;
+}
+
+.colorUsage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 20px;
+}
+
+.colorUsage > span {
+    display: inline-flex;
+    gap: 8px;
+}
+
+.colorUsage > span > span {
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-size: 12px;
+}
+
+.semanticScales {
+    display: grid;
+    gap: 24px;
+}
+
+.semanticRow {
+    display: grid;
+    grid-template-columns: 96px minmax(0, 1fr);
+    align-items: start;
+    gap: 24px;
+}
+
+.semanticHeading {
+    display: grid;
+    justify-items: start;
+    gap: 4px;
+    padding-top: 2px;
+}
+
+.semanticDot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.semanticGrid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.semanticSwatch {
+    height: 40px;
+    margin-bottom: 8px;
+}
+
+.rhythmGroup,
+.radiusGroup {
+    display: grid;
+    gap: 20px;
+}
+
+.spacingGrid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 20px 12px;
+}
+
+.spacingItem {
+    display: grid;
+    align-content: start;
+    justify-items: start;
+    gap: 12px;
+}
+
+.spacingSample {
+    display: flex;
+    align-items: center;
+    height: 32px;
+}
+
+.spacingSample span {
+    width: 12px;
+    height: 24px;
+    background: var(--orbit-neutral-200);
+    border-radius: 2px;
+}
+
+.spacingSample span:first-child {
+    background: var(--orbit-neutral-800);
+}
+
+.measurement {
+    display: flex;
+    gap: 4px;
+    align-items: baseline;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.measurement span {
+    color: var(--muted-foreground);
+    font-size: 12px;
+}
+
+.radiusGroup {
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+}
+
+.radiusGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.radiusItem {
+    display: grid;
+    justify-items: start;
+    align-content: start;
+    gap: 6px;
+}
+
+.radiusSample {
+    width: 64px;
+    height: 48px;
+    margin-bottom: 6px;
+    border: 1px solid var(--orbit-neutral-300);
+    background: var(--orbit-neutral-50);
+}
+
+@media (max-width: 640px) {
+    .fontHeading {
+        gap: 12px;
+    }
+
+    .fontSpecimen {
+        font-size: 24px;
+        line-height: 34px;
+    }
+
+    .typeRow {
+        grid-template-columns: 62px minmax(0, 1fr);
+        gap: 16px;
+        padding-block: 14px;
+    }
+
+    .typeMeta {
+        flex-direction: column;
+        gap: 0;
+    }
+
+    .neutralGrid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 20px 10px;
+    }
+
+    .semanticRow {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+    }
+
+    .semanticHeading {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+    }
+
+    .semanticGrid {
+        gap: 8px;
+    }
+
+    .semanticSwatch {
+        height: 44px;
+    }
+
+    .spacingGrid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .radiusGrid {
+        gap: 12px;
+    }
+}
